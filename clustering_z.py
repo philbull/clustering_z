@@ -257,6 +257,7 @@ tracer2 = [ selection_im(z_min[i], z_max[i]) for i in range(z_min.size) ]
 # Build covariance matrix
 Cij = build_covmat(ell, tracer1, tracer2, z_min, z_max)
 
+# Plot correlation matrix for a given ell
 print corrmat(Cij[80])[0,:]
 print corrmat(Cij[80])[-1,:]
 P.matshow(corrmat(Cij[80]), cmap='RdBu', vmin=-1., vmax=1.)
