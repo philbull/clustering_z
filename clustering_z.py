@@ -5,16 +5,26 @@ Plot cross-correlation between photometric survey and IM survey.
 import numpy as np
 import pylab as P
 import pyccl as ccl
+from scipy.integrate import simps
+from scipy.special import erf
 import matplotlib.ticker
 from multiprocessing import Pool
 
 NTHREADS = 2 # Doesn't do anything yet
 
-C = 29979.2458 # Speed of light, km/s
-INF_NOISE = 1e100
+C = 299792.458 # Speed of light, km/s
+INF_NOISE = 1e50 #np.inf #1e100
 
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
+
+inst = {
+    # Interferometer parameters
+    'd_min':    6., # m
+    'd_max':    300., # m
+    'sigma_T':  1e-3 # mK rad MHz^1/2
+}
+
 
 def kperp_fg(z, xi):
     """
@@ -40,16 +50,64 @@ def bias_HI(z):
     return 6.6655e-01 + 1.7765e-01*z + 5.0223e-02*z**2.
 
 
+def dNdz_lsst(z):
+    """
+    dN/dz for LSST, in galaxies/rad^2.
+    """
+    # Define parameters for sample
+    i_lim = 26. # Limiting i-band magnitude
+    z0 = 0.0417*i_lim - 0.744
+
+    Ngal = 46. * 100.31 * (i_lim - 25.) # Normalisation, galaxies/deg^2?
+    pz = 1./(2.*z0) * (z / z0)**2. * np.exp(-z/z0) # Redshift distribution, p(z)
+    dNdz = Ngal * pz # Number density distribution
+    
+    # FIXME: Fudge factor to get the right order of mag, c.f. Fig. 2 of Alonso
+    dNdz *= 18. # in deg^-2
+    return dNdz * (180./np.pi)**2. # in rad^-2
+
+
+def photoz_pdf(z_ph, z_s, sigma_z0):
+    """
+    Photometric redshift probability, p(z_ph | z_s).
+    """
+    sigma_z = sigma_z0 * (1. + z_s)
+    return np.exp(- (z_ph - z_s)**2. / (2.*sigma_z**2.)) \
+          / (np.sqrt(2.*np.pi) * sigma_z)
+
+
+def photoz_window(z, z_i, z_f, sigma_z0):
+    """
+    Integrated photo-z probability for a top-hat bin between z_i and z_f, 
+    assuming a Gaussian photo-z pdf. From Eq. 28 of arXiv:1507.03550.
+    """
+    sigma_z = sigma_z0 * (1. + z)
+    w = 0.5 * (  erf((z - z_i) / (np.sqrt(2.)*sigma_z)) \
+               - erf((z - z_f) / (np.sqrt(2.)*sigma_z)) )
+    return w
+
+
+def photoz_selection(z, zmin, zmax, dNdz_func, sigma_z0):
+    """
+    Get selection function in a redshift bin, given some galaxy number density 
+    function.
+    """
+    # Get galaxy number density curve
+    dNdz = dNdz_func(z)
+    pz = photoz_window(z, zmin, zmax, sigma_z0)
+    
+    # Get total galaxy number density in bin
+    n_tot = simps(dNdz * pz, z)
+    
+    # Return unnormed selection function and total galaxy number density
+    return dNdz * pz, n_tot
+
+
 def calculate_block_noise_int(ells, zmin, zmax):
     """
     Approximate noise expression for a radio interferometer, using Eq. 8 of 
     Alonso et al.
     """
-    # Interferometer parameters
-    d_min = 6.
-    d_max = 300.
-    sigma_T = 1e-3 # mK rad MHz^1/2
-    
     # Frequency scaling
     zc = 0.5 * (zmin + zmax)
     nu = 1420. / (1. + zc)
@@ -60,26 +118,42 @@ def calculate_block_noise_int(ells, zmin, zmax):
     
     # Angular scaling
     _ell, _lam = np.meshgrid(ells, lam)
-    f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / d_max)**2. \
+    f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / inst['d_max'])**2. \
           / (8.*np.log(2.)))
     
     # Construct noise covariance
-    N_ij = f_ell * sigma_T**2. / dnu[:,None] # FIXME: Is this definitely dnu?
+    N_ij = f_ell * inst['sigma_T']**2. / dnu[:,None]
+    # FIXME: Is this definitely channel bandwidth, rather than total bandwidth?
     
     # Apply large-scale cut
-    N_ij[np.where(_ell*_lam/(2.*np.pi) <= d_min)] = INF_NOISE
+    N_ij[np.where(_ell*_lam/(2.*np.pi) <= inst['d_min'])] = INF_NOISE
     return N_ij.T
+
+
+def calculate_block_noise_lsst(ells, nz_lsst):
+    """
+    Shot noise in each redshift bin, taken by integrating dN/dz over the 
+    selection function for the bin.
+    """
+    # Construct diagonal shot noise covariance for LSST bins
+    N_ij = np.zeros((ells.size, len(nz_lsst)))
+    for i, nz in enumerate(nz_lsst):
+        N_ij[:,i] = np.ones(ells.size) / nz
+    return N_ij
     
 
-def selection_lsst(zmin, zmax, sigma_z0, debug=False):
+def selection_lsst(zmin, zmax, sigma_z0):
     """
     Calculate tomographic redshift bin selection function and bias for LSST.
     """
+    print "\tselection_lsst"
     # Number counts/selection function in this tomographic redshift bin
     z = np.linspace(0., 3., 1000)
-    pz_lsst = ccl.PhotoZGaussian(sigma_z0)
-    tomo_lsst = ccl.dNdz_tomog(z, 'nc', zmin, zmax, pz_lsst)
-    #tomo_lsst = np.exp(-0.5*(z - 0.5)**2. / sigma_z0**2.)
+    #pz_lsst = ccl.PhotoZGaussian(sigma_z0)
+    #tomo_lsst1 = ccl.dNdz_tomog(z, 'nc', zmin, zmax, pz_lsst)
+    
+    nz, ntot = photoz_selection(z, zmin, zmax, dNdz_lsst, sigma_z0)
+    tomo_lsst = nz / ntot
     
     # Clustering bias
     bz_lsst = ccl.bias_clustering(cosmo, 1./(1.+z))
@@ -87,11 +161,8 @@ def selection_lsst(zmin, zmax, sigma_z0, debug=False):
     # Number density tracer object
     n_lsst = ccl.ClTracerNumberCounts(cosmo, 
                                       has_rsd=False, has_magnification=False, 
-                                      n=(z, tomo_lsst), bias=(z, bz_lsst))
-    if debug:
-        return z, tomo_lsst, bz_lsst, n_lsst
-    else:
-        return n_lsst
+                                      n=(z, nz), bias=(z, bz_lsst))
+    return n_lsst, ntot
 
 
 def selection_im(zmin, zmax, debug=False, scale=1.):
@@ -99,6 +170,7 @@ def selection_im(zmin, zmax, debug=False, scale=1.):
     Calculate tomographic redshift bin selection function and bias for an 
     IM experiment. Each factor of this tracer will have units of mK.
     """
+    print "\tselection_im"
     # Number counts/selection function in this tomographic redshift bin
     z = np.linspace(zmin*0.9, zmax*1.1, 500) # Pad zmin, zmax slightly
     tomo_im = np.zeros(z.size)
@@ -187,7 +259,63 @@ def expand_diagonal(dmat):
     return mat
 
 
-def build_covmat(ells, tracer1, tracer2, zmin_im, zmax_im):
+def deriv_photoz(ell, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
+    """
+    Calculate derivative of covariance matrix w.r.t. photo-z parameters.
+    """
+    N1 = len(tracer1)
+    N2 = len(tracer2)
+    
+    # Build new set of tracers with modified photo-z properties
+    tracer1_p = []; tracer1_m = []
+    for i in range(zmin_lsst.size):
+        tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0+dp)
+        tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0-dp)
+        tracer1_p.append(tp); tracer1_m.append(tm)
+    
+    # Calculate photoz derivs
+    print "derivs photoz"
+    
+    # Calculate +/- for each photoz bin; loop over tracers with +/- sigma_z0
+    dCij_dsigmaz0_list = []
+    for i in range(N1):
+        Sij_pz_pz_p = np.zeros((ell.size, N1, N1))
+        Sij_pz_pz_m = np.zeros((ell.size, N1, N1))
+        Sij_pz_im_p = np.zeros((ell.size, N1, N2))
+        Sij_pz_im_m = np.zeros((ell.size, N1, N2))
+        
+        # Get angular Cl for this bin (w. modified sigma_z0) with other pz bins
+        print "  deriv photoz-photoz"
+        for j in range(N1):
+            trp = tracer1[j] if i != j else tracer1_p[i]
+            trm = tracer1[j] if i != j else tracer1_m[i]
+            Sij_pz_pz_p[:,i,j] = ccl.angular_cl(cosmo, tracer1_p[i], trp, ell)
+            Sij_pz_pz_m[:,i,j] = ccl.angular_cl(cosmo, tracer1_m[i], trm, ell)
+        
+        # FIXME: Derivative of pz-pz noise term, along the diagonal?
+        # TODO
+        
+        # Get angular Cl for this bin crossed with IM bins
+        print "  deriv photoz-im"
+        for j in range(N2):
+            Sij_pz_im_p[:,i,j] \
+                = ccl.angular_cl(cosmo, tracer1_p[i], tracer2[j], ell)
+            Sij_pz_im_m[:,i,j] \
+                = ccl.angular_cl(cosmo, tracer1_m[i], tracer2[j], ell)
+        
+        # Calculate finite difference derivatives for each block and insert 
+        # into full matrix for derivative of covmat
+        dCij_dsigmaz0 = np.zeros((ell.size, N1+N2, N1+N2))
+        dCij_dsigmaz0[:,:N1,:N1] = (Sij_pz_pz_p - Sij_pz_pz_m) / (2.*dp)
+        dCij_dsigmaz0[:,N1:,N1:] = (Sij_pz_im_p - Sij_pz_im_m) / (2.*dp)
+        dCij_dsigmaz0_list.append(dCij_dsigmaz0)
+        
+    return dCij_dsigmaz0_list
+    
+    
+
+
+def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im, blocks=None):
     """
     Build full covariance matrix from individual blocks.
     N.B. tracer2 should be the IM tracer!
@@ -212,11 +340,12 @@ def build_covmat(ells, tracer1, tracer2, zmin_im, zmax_im):
     Sij_pz_im = calculate_block_gen(ell, tracer1, tracer2)
     
     # Calculate IM noise auto block
+    print "noise im-im"
     Nij_im_im = calculate_block_noise_int(ell, zmin_im, zmax_im)
     
     # Calculate LSST noise auto block
-    # TODO
-    Nij_pz_pz = 0.
+    print "noise photoz-photoz"
+    Nij_pz_pz = calculate_block_noise_lsst(ell, nz_lsst)
     
     # Calculate IM foreground residual auto block
     print "foreground im-im"
@@ -224,13 +353,20 @@ def build_covmat(ells, tracer1, tracer2, zmin_im, zmax_im):
     
     # Construct total covariance matrix
     Cij = np.zeros((ells.size, N1 + N2, N1 + N2))
-    Cij[:,:N1,:N1] = Sij_pz_pz + Nij_pz_pz
+    Cij[:,:N1,:N1] = Sij_pz_pz + expand_diagonal(Nij_pz_pz)
     Cij[:,N1:,N1:] = expand_diagonal(Sij_im_im) \
                    + expand_diagonal(Nij_im_im) \
                    + Fij_im_im
     Cij[:,:N1,N1:] = Sij_pz_im
     Cij[:,N1:,:N1] = np.transpose(Sij_pz_im, axes=(0,2,1))
     return Cij
+
+
+def calculate_derivs():
+    """
+    Calculate Fisher derivatives in relevant blocks.
+    """
+    return 0
 
 
 def corrmat(mat):
@@ -244,23 +380,80 @@ def corrmat(mat):
     return mat_corr
 
 
+def fisher(cov):
+    """
+    Calculate Fisher matrix.
+    """
+    Cinv = np.linalg.inv(cov[300])
+    P.matshow(corrmat(Cinv), cmap='RdBu', vmin=-1., vmax=1.)
+    P.colorbar()
+    P.show()
+
+
+#ell = np.linspace(2., 1000., 1000)
+#for z in np.linspace(0.8, 3., 6):
+#    lam = 0.21 * (1. + z)
+#    P.plot(ell, ell*lam/(2.*np.pi), label="z = %2.2f" % z)
+
+#P.axhline(inst['d_min'])
+
+#P.legend(loc='upper right')
+#P.tight_layout()
+#P.show()
+
 # Define angular scales and redshift bins
-ell = np.arange(4, 100)
-z_min = np.arange(0.2, 0.8, 0.05)
-z_max = z_min + (z_min[1] - z_min[0])
+ell = np.arange(4, 400)
+zmin_lsst = np.arange(0.8, 2.8, 0.3)
+zmax_lsst = zmin_lsst + (zmin_lsst[1] - zmin_lsst[0])
+zmin_im = np.arange(0.7, 0.9, 0.03)
+zmax_im = zmin_im + (zmin_im[1] - zmin_im[0])
 
 # Define lists of tracers
-tracer1 = [ selection_lsst(0.4, 0.6, sigma_z0=0.05), 
-            selection_lsst(0.6, 0.8, sigma_z0=0.05) ]
-tracer2 = [ selection_im(z_min[i], z_max[i]) for i in range(z_min.size) ]
+print "Initialising tracers..."
+lsst_sel = [ selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=0.03) 
+             for i in range(zmin_lsst.size) ]
+tracer1, nz_lsst = zip(*lsst_sel)
+tracer2 = [ selection_im(zmin_im[i], zmax_im[i]) 
+            for i in range(zmin_im.size) ]
 
 # Build covariance matrix
-Cij = build_covmat(ell, tracer1, tracer2, z_min, z_max)
+print "Building covmat..."
+Cij = build_covmat(ell, tracer1, tracer2, nz_lsst, zmin_im, zmax_im)
+
+# FIXME
+fisher(Cij)
+
+exit()
+# Plotting
+P.subplot(111)
+P.plot(ell, Cij[:,0,7], lw=1.8, 
+       label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[0]))
+P.plot(ell, Cij[:,0,8], lw=1.8, 
+       label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[1]))
+P.plot(ell, Cij[:,0,9], lw=1.8, 
+       label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[2]))
+P.plot(ell, Cij[:,0,10], lw=1.8, 
+       label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[3]))
+P.plot(ell, Cij[:,0,11], lw=1.8, 
+       label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[4]))
+
+P.plot(ell, Cij[:,7,7], 'k-', lw=1.8)
+
+P.yscale('log')
+#P.ylim(())
+
+P.legend(loc='lower right', frameon=False)
+P.tight_layout()
+P.show()
+exit()
 
 # Plot correlation matrix for a given ell
-print corrmat(Cij[80])[0,:]
-print corrmat(Cij[80])[-1,:]
-P.matshow(corrmat(Cij[80]), cmap='RdBu', vmin=-1., vmax=1.)
+i_ell = 15
+print corrmat(Cij[i_ell])[0,:]
+print corrmat(Cij[i_ell])[-1,:]
+P.matshow(corrmat(Cij[:,0,7]), cmap='RdBu', vmin=-1., vmax=1.)
+P.axhline(len(tracer1)-0.5, color='k', ls='dashed', lw=1.8)
+P.axvline(len(tracer1)-0.5, color='k', ls='dashed', lw=1.8)
 P.colorbar()
 P.show()
 
