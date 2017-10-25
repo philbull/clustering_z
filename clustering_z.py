@@ -8,9 +8,16 @@ import pyccl as ccl
 from scipy.integrate import simps
 from scipy.special import erf
 import matplotlib.ticker
-from multiprocessing import Pool
+#from multiprocessing import Pool
+import time
+from mpi4py import MPI
 
-NTHREADS = 2 # Doesn't do anything yet
+# Set up MPI
+comm = MPI.COMM_WORLD
+myid = comm.Get_rank()
+size = comm.Get_size()
+
+prefix = "xhrx"
 
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
@@ -24,6 +31,16 @@ inst = {
     'd_max':    300., # m
     'sigma_T':  1e-3 # mK rad MHz^1/2
 }
+
+# FIXME
+sigma_z0 = 0.03
+
+
+def status(msg):
+    """
+    Print a status message (handles MPI)
+    """
+    if myid == 0: print(msg)
 
 
 def kperp_fg(z, xi):
@@ -146,11 +163,9 @@ def selection_lsst(zmin, zmax, sigma_z0):
     """
     Calculate tomographic redshift bin selection function and bias for LSST.
     """
-    print "\tselection_lsst"
+    status("\tselection_lsst")
     # Number counts/selection function in this tomographic redshift bin
     z = np.linspace(0., 3., 1000)
-    #pz_lsst = ccl.PhotoZGaussian(sigma_z0)
-    #tomo_lsst1 = ccl.dNdz_tomog(z, 'nc', zmin, zmax, pz_lsst)
     
     nz, ntot = photoz_selection(z, zmin, zmax, dNdz_lsst, sigma_z0)
     tomo_lsst = nz / ntot
@@ -170,7 +185,7 @@ def selection_im(zmin, zmax, debug=False, scale=1.):
     Calculate tomographic redshift bin selection function and bias for an 
     IM experiment. Each factor of this tracer will have units of mK.
     """
-    print "\tselection_im"
+    status("\tselection_im")
     # Number counts/selection function in this tomographic redshift bin
     z = np.linspace(zmin*0.9, zmax*1.1, 500) # Pad zmin, zmax slightly
     tomo_im = np.zeros(z.size)
@@ -198,7 +213,7 @@ def calculate_block_fg(ells, zc):
     A_fg = 1. # mK^2
     alpha = -2.7
     beta = -2.4
-    xi = 0.01 # Frequency correlation scale
+    xi = 100. # Frequency correlation scale
     
     # Pivot scales and frequency scaling
     l_star = 1000.
@@ -206,7 +221,7 @@ def calculate_block_fg(ells, zc):
     nu = 1420. / (1. + zc)
     
     # Calculate angle-dep. factor
-    f_ell = (ell / l_star)**beta
+    f_ell = (ells / l_star)**beta
     
     # Frequency-dependent covariance factor
     _nu, _nuprime = np.meshgrid(nu, nu)
@@ -224,15 +239,20 @@ def calculate_block_gen(ells, tracer1, tracer2):
     """
     Ni = len(tracer1)
     Nj = len(tracer2)
-    Cij = np.zeros((ell.size, Ni, Nj))
+    Cij = np.zeros((ells.size, Ni, Nj))
     
     # Construct cross-correlation block
     for i in range(Ni):
-        print " ", i
+        if i % size != myid: continue
+        print "  Bin %d / %d (worker %d)" % (i, Ni, myid)
         for j in range(Nj):
-            print "   ", j
+            print "    xcorr %d / %d (worker %d)" % (j, Nj, myid)
             Cij[:,i,j] = ccl.angular_cl(cosmo, tracer1[i], tracer2[j], ells)
-    return Cij
+    
+    # Combine all calculated Cij at the root process
+    Cij_all = np.zeros(Cij.shape)
+    comm.Reduce(Cij, Cij_all, op=MPI.SUM)
+    return Cij_all
 
 
 def calculate_block_diag(ells, tracer1):
@@ -240,13 +260,18 @@ def calculate_block_diag(ells, tracer1):
     Calculate an assumed-diagonal block of auto-correlations.
     """
     Ni = len(tracer1)
-    Cij = np.zeros((ell.size, Ni))
+    Cij = np.zeros((ells.size, Ni))
     
     # Construct cross-correlation block
     for i in range(Ni):
-        print " ", i
+        if i % size != myid: continue
+        print "  Bin %d / %d (worker %d)" % (i, Ni, myid)
         Cij[:,i] = ccl.angular_cl(cosmo, tracer1[i], tracer1[i], ells)
-    return Cij
+    
+    # Combine all calculated Cij at the root process
+    Cij_all = np.zeros(Cij.shape)
+    comm.Reduce(Cij, Cij_all, op=MPI.SUM)
+    return Cij_all
 
 
 def expand_diagonal(dmat):
@@ -259,7 +284,73 @@ def expand_diagonal(dmat):
     return mat
 
 
-def deriv_photoz(ell, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
+def cache_save(blkname, blk):
+    """
+    Save a block to a cache file.
+    """
+    if myid == 0:
+        np.save("%s_%s" % (prefix, blkname), blk)
+
+
+def cache_load(blkname, args=None, shape=None):
+    """
+    Load a cached datafile.
+    """
+    cache_hit = False
+    cache_valid = False
+    res = None
+    
+    # Get expected shape of cached data
+    if args is not None:
+        shape = [len(a) for a in args]
+    
+    # Try to load cached data
+    try:
+        res = np.load("%s_%s.npy" % (prefix, blkname))
+        status("  Loaded from cache.")
+        cache_hit = True
+        
+        # Sanity check on shape of cached data
+        assert res.shape[0] == shape[0]
+        assert res.shape[1] == shape[1]
+        if len(res.shape) > 2: assert res.shape[2] == shape[2]
+        cache_valid = True
+    except:
+        pass
+    
+    return res, cache_hit, cache_valid
+
+
+def cache(blkname, func, args):
+    """
+    Simple caching of computed blocks.
+    """
+    cache_hit = False
+    cache_valid = False
+    res = None
+    
+    # Check if cache exists and load from it if so (only root does I/O)
+    if myid == 0:
+        res, cache_hit, cache_valid = cache_load(blkname, args)
+    
+    # Inform all processes about cache status
+    cache_hit = comm.bcast(cache_hit, root=0)
+    cache_valid = comm.bcast(cache_valid, root=0)
+    if cache_hit and cache_valid:
+        return res
+    
+    # Return None if no function specified (useful for flagging uncached data)
+    if func is None: return res
+    
+    # If no cache exists (or if it's invalid), recompute and save to cache
+    if cache_valid: status("  Not cached; recomputing.")
+    if not cache_valid: status("  Cache is from different setup. Overwriting.")
+    res = func(*args)
+    cache_save(blkname, res)
+    return res
+
+
+def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
     """
     Calculate derivative of covariance matrix w.r.t. photo-z parameters.
     """
@@ -274,45 +365,90 @@ def deriv_photoz(ell, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
         tracer1_p.append(tp); tracer1_m.append(tm)
     
     # Calculate photoz derivs
-    print "derivs photoz"
+    status("derivs photoz")
     
     # Calculate +/- for each photoz bin; loop over tracers with +/- sigma_z0
-    dCij_dsigmaz0_list = []
+    dCij_dsigmaz0 = []
+    shape = (ells.size, N1+N2, N1+N2)
     for i in range(N1):
-        Sij_pz_pz_p = np.zeros((ell.size, N1, N1))
-        Sij_pz_pz_m = np.zeros((ell.size, N1, N1))
-        Sij_pz_im_p = np.zeros((ell.size, N1, N2))
-        Sij_pz_im_m = np.zeros((ell.size, N1, N2))
+        
+        # Check if this derivative exists in the cache
+        cache_hit = False; cache_valid = False
+        if myid == 0:
+            blkname = "deriv_sigmaz0_%d" % i
+            res, cache_hit, cache_valid = cache_load(blkname, shape=shape)
+            
+            # Append result to list if cache exists; otherwise, run through the 
+            # whole calculation below
+            if cache_hit and cache_valid:
+                dCij_dsigmaz0.append(res)
+        
+        # Inform all processes about cache status
+        cache_hit = comm.bcast(cache_hit, root=0)
+        cache_valid = comm.bcast(cache_valid, root=0)
+        if cache_hit and cache_valid:
+            continue
+        
+        # Cache not found; set up to do the whole calculation for this deriv.
+        dC_p = np.zeros((ells.size, N1+N2, N1+N2))
+        dC_m = np.zeros((ells.size, N1+N2, N1+N2))
         
         # Get angular Cl for this bin (w. modified sigma_z0) with other pz bins
-        print "  deriv photoz-photoz"
+        status("  deriv photoz-photoz %d / %d" % (i, N1))
+        comm.barrier()
+        
         for j in range(N1):
-            trp = tracer1[j] if i != j else tracer1_p[i]
-            trm = tracer1[j] if i != j else tracer1_m[i]
-            Sij_pz_pz_p[:,i,j] = ccl.angular_cl(cosmo, tracer1_p[i], trp, ell)
-            Sij_pz_pz_m[:,i,j] = ccl.angular_cl(cosmo, tracer1_m[i], trm, ell)
+            if j % size != myid: continue
+            print "    Bin %d / %d (worker %d)" % (j, N1, myid)
+            
+            # Calculate finite difference deriv.
+            trp = tracer1[j] if i != j else tracer1_p[j]
+            trm = tracer1[j] if i != j else tracer1_m[j]
+            dC_p[:,i,j] = dC_p[:,j,i] \
+                = ccl.angular_cl(cosmo, tracer1_p[i], trp, ells)
+            dC_m[:,i,j] = dC_m[:,j,i] \
+                = ccl.angular_cl(cosmo, tracer1_m[i], trm, ells)
         
         # FIXME: Derivative of pz-pz noise term, along the diagonal?
-        # TODO
+        # TODO: Should this be in there?
         
         # Get angular Cl for this bin crossed with IM bins
-        print "  deriv photoz-im"
+        status("  deriv photoz-im %d / %d" % (i, N1))
         for j in range(N2):
-            Sij_pz_im_p[:,i,j] \
-                = ccl.angular_cl(cosmo, tracer1_p[i], tracer2[j], ell)
-            Sij_pz_im_m[:,i,j] \
-                = ccl.angular_cl(cosmo, tracer1_m[i], tracer2[j], ell)
+            if j % size != myid: continue
+            print "    Bin %d / %d (worker %d)" % (j, N2, myid)
+            
+            # Calculate finite difference deriv.
+            dC_p[:,i,N1+j] = dC_p[:,N1+j,i] \
+                = ccl.angular_cl(cosmo, tracer1_p[i], tracer2[j], ells)
+            dC_m[:,i,N1+j] = dC_m[:,N1+j,i] \
+                = ccl.angular_cl(cosmo, tracer1_m[i], tracer2[j], ells)
+        
+        # Combine all calculated dC_p,m at the root process
+        dC_p_all = np.zeros(dC_p.shape)
+        dC_m_all = np.zeros(dC_m.shape)
+        comm.Reduce(dC_p, dC_p_all, op=MPI.SUM)
+        comm.Reduce(dC_m, dC_m_all, op=MPI.SUM)
         
         # Calculate finite difference derivatives for each block and insert 
         # into full matrix for derivative of covmat
-        dCij_dsigmaz0 = np.zeros((ell.size, N1+N2, N1+N2))
-        dCij_dsigmaz0[:,:N1,:N1] = (Sij_pz_pz_p - Sij_pz_pz_m) / (2.*dp)
-        dCij_dsigmaz0[:,N1:,N1:] = (Sij_pz_im_p - Sij_pz_im_m) / (2.*dp)
-        dCij_dsigmaz0_list.append(dCij_dsigmaz0)
+        if myid == 0:
+            res = (dC_p_all - dC_m_all) / (2.*dp)
+            dCij_dsigmaz0.append(res)
+            cache_save(blkname, res)
         
-    return dCij_dsigmaz0_list
-    
-    
+    return dCij_dsigmaz0
+
+
+def invert_covmat(cov):
+    """
+    Invert a covariance matrix, ell by ell. Assumes covmat has the following 
+    shape: (N_ells, N_zbins, N_zbins).
+    """
+    icov = np.zeros(cov.shape)
+    for i in range(cov.shape[0]):
+        icov[i,:,:] = np.linalg.inv(cov[i,:,:])
+    return icov
 
 
 def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im, blocks=None):
@@ -328,28 +464,41 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im, blocks=None)
     zc = 0.5 * (zmin_im + zmax_im)
     
     # Calculate IM auto block
-    print "signal im-im"
-    Sij_im_im = calculate_block_diag(ell, tracer2)
+    status("signal im-im")
+    Sij_im_im = cache('Sij_im_im', 
+                      calculate_block_diag, 
+                      (ells, tracer2))
 
     # Calculate LSST auto block
-    print "signal photoz-photoz"
-    Sij_pz_pz = calculate_block_gen(ell, tracer1, tracer1)
+    status("signal photoz-photoz")
+    Sij_pz_pz = cache('Sij_pz_pz', 
+                      calculate_block_gen, 
+                      (ells, tracer1, tracer1))
     
     # Calculate cross-tracer signal block
-    print "signal photoz-im"
-    Sij_pz_im = calculate_block_gen(ell, tracer1, tracer2)
+    status("signal photoz-im")
+    Sij_pz_im = cache('Sij_pz_im', 
+                      calculate_block_gen, 
+                      (ells, tracer1, tracer2))
     
     # Calculate IM noise auto block
-    print "noise im-im"
-    Nij_im_im = calculate_block_noise_int(ell, zmin_im, zmax_im)
+    status("noise im-im")
+    Nij_im_im = cache('Nij_im_im', 
+                      calculate_block_noise_int, 
+                      (ells, zmin_im, zmax_im))
     
     # Calculate LSST noise auto block
-    print "noise photoz-photoz"
-    Nij_pz_pz = calculate_block_noise_lsst(ell, nz_lsst)
+    status("noise photoz-photoz")
+    Nij_pz_pz = cache('Nij_pz_pz', 
+                      calculate_block_noise_lsst, 
+                      (ells, nz_lsst))
     
     # Calculate IM foreground residual auto block
-    print "foreground im-im"
-    Fij_im_im = calculate_block_fg(ell, zc)
+    status("foreground im-im")
+    Fij_im_im = 0. #calculate_block_fg(ells, zc) # FIXME
+    
+    # Piece together blocks on root worker only
+    if myid != 0: return None
     
     # Construct total covariance matrix
     Cij = np.zeros((ells.size, N1 + N2, N1 + N2))
@@ -360,13 +509,6 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im, blocks=None)
     Cij[:,:N1,N1:] = Sij_pz_im
     Cij[:,N1:,:N1] = np.transpose(Sij_pz_im, axes=(0,2,1))
     return Cij
-
-
-def calculate_derivs():
-    """
-    Calculate Fisher derivatives in relevant blocks.
-    """
-    return 0
 
 
 def corrmat(mat):
@@ -380,48 +522,86 @@ def corrmat(mat):
     return mat_corr
 
 
-def fisher(cov):
+def fisher(ells, z_lsst, z_im):
     """
     Calculate Fisher matrix.
     """
-    Cinv = np.linalg.inv(cov[300])
-    P.matshow(corrmat(Cinv), cmap='RdBu', vmin=-1., vmax=1.)
-    P.colorbar()
-    P.show()
+    # Get redshift bin arrays
+    zmin_lsst, zmax_lsst = z_lsst
+    zmin_im, zmax_im = z_im
+    
+    # Initialise tracers
+    status("Initialising tracers...")
+    lsst_sel = [ selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0) 
+                 for i in range(zmin_lsst.size) ]
+    tracer1, nz_lsst = zip(*lsst_sel)
+    tracer2 = [ selection_im(zmin_im[i], zmax_im[i]) 
+                for i in range(zmin_im.size) ]
+    
+    # Build covariance matrix and invert
+    cov = build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im)
+    if myid == 0:
+        Cinv = invert_covmat(cov)
+    comm.barrier()
+    status("All processes finished covmat.")
+    
+    # Get derivatives of covmat
+    derivs_pz = deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3)
+    #for k in range(len(derivs_pz)):
+    #    np.save("derivdbg_pz%d" % k, derivs_pz[k])
+    
+    # Accounting for number of parameters
+    Nparam = len(derivs_pz)
+    
+    # Calculate Fisher matrix
+    Fij_ell = np.zeros((ells.size, Nparam, Nparam))
+    for l in range(len(ells)):
+      for i in range(Nparam):
+        y_i = np.dot(Cinv[l], derivs_pz[i][l])
+        for j in range(Nparam):
+          y_j = np.dot(Cinv[l], derivs_pz[j][l])
+          Fij_ell[l,i,j] = (ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+    
+    comm.barrier()
+    if myid == 0: return Fij_ell
+    return None
 
 
-#ell = np.linspace(2., 1000., 1000)
-#for z in np.linspace(0.8, 3., 6):
-#    lam = 0.21 * (1. + z)
-#    P.plot(ell, ell*lam/(2.*np.pi), label="z = %2.2f" % z)
-
-#P.axhline(inst['d_min'])
-
-#P.legend(loc='upper right')
-#P.tight_layout()
-#P.show()
+def zbins_lsst_alonso(nbins=15):
+    """
+    Get redshift bins edges as defined in Alonso et al.
+    """
+    Deltaz = lambda zmin: 3.*sigma_z0 * (1. + zmin) / (1 - 0.5*3.*sigma_z0)
+    zmin = [0.,]; zmax = []
+    for i in range(nbins-1):
+        dz = Deltaz(zmin[i])
+        zmin.append(zmin[i] + dz)
+        zmax.append(zmin[i] + dz)
+    zmax.append(zmin[-1] + dz)
+    return np.array(zmin), np.array(zmax)
+    
 
 # Define angular scales and redshift bins
-ell = np.arange(4, 400)
-zmin_lsst = np.arange(0.8, 2.8, 0.3)
-zmax_lsst = zmin_lsst + (zmin_lsst[1] - zmin_lsst[0])
-zmin_im = np.arange(0.7, 0.9, 0.03)
+ells = np.arange(4, 501)
+zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
+#zmin_im = np.arange(0.2, 2.5, 0.05)
+zmin_im = np.arange(0.2, 2.5, 0.05)
 zmax_im = zmin_im + (zmin_im[1] - zmin_im[0])
 
-# Define lists of tracers
-print "Initialising tracers..."
-lsst_sel = [ selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=0.03) 
-             for i in range(zmin_lsst.size) ]
-tracer1, nz_lsst = zip(*lsst_sel)
-tracer2 = [ selection_im(zmin_im[i], zmax_im[i]) 
-            for i in range(zmin_im.size) ]
 
-# Build covariance matrix
-print "Building covmat..."
-Cij = build_covmat(ell, tracer1, tracer2, nz_lsst, zmin_im, zmax_im)
+# Build Fisher matrix
+print "Calculating Fisher matrix..."
+t0 = time.time()
+Fij_ell = fisher(ells, (zmin_lsst, zmax_lsst), (zmin_im, zmax_im))
+print "Run finished in %1.1f min." % ((time.time() - t0)/60.)
 
-# FIXME
-fisher(Cij)
+# Sum over ell modes; save unsummed matrix to file
+Fij = np.sum(Fij_ell, axis=0)
+np.save("Fdbg", Fij_ell)
+
+P.matshow(Fij)
+P.colorbar()
+P.show()
 
 exit()
 # Plotting
