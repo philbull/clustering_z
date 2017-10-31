@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 """
 Plot cross-correlation between photometric survey and IM survey.
 """
@@ -17,25 +17,56 @@ comm = MPI.COMM_WORLD
 myid = comm.Get_rank()
 size = comm.Get_size()
 
-prefix = "x3hrx"
-
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
 
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
 
+
 inst = {
     # Interferometer parameters
+    'name': "hrx",
+    'type': "interferometer",
     'd_min':    6., # m
-    'd_max':    300., # m
-    'sigma_T':  1e-3 # mK rad MHz^1/2
+    'd_max':    32*6.*np.sqrt(2), # m
+    'Ndish':   32*32,
+    'fsky' : 0.4,
+    'Tsys' : 50, # in K
+    'intgtime' : 2.8e4,
+    'fsky_overlap': 0.4
 }
+
+inst = {
+    # Interferometer parameters
+    'name': "GBT",
+    'type': "dish",
+    'D':    100,
+    'Ndish': 7,
+    'fsky' : 0.15,
+    'Tsys' : 30, # in K
+    'intgtime' : 3.2e4,
+    'fsky_overlap': 0.15
+}
+
+
+
+prefix = inst['name']+str(hash(frozenset(inst.items())))
+
+
 
 # FIXME
 sigma_z0 = 0.03
 
 
+def calc_sigmaT(inst):
+    ## 1000 (mK in  K) /sqrt(1e6 MHz in Hz) = 1
+    sigma_T=np.sqrt(inst['Tsys']**2*np.pi*4*inst['fsky']/(inst['intgtime']*3600)/inst['Ndish'])
+    inst['sigma_T']=sigma_T
+    print "Sigma_T=",sigma_T
+    return inst
+
+    
 def status(msg):
     """
     Print a status message (handles MPI)
@@ -132,18 +163,30 @@ def calculate_block_noise_int(ells, zmin, zmax):
     
     # Bin widths and angular cutoffs
     dnu = 1420. * (1./(1. + zmin) - 1./(1. + zmax))
+
+    if inst['type']=='interferometer':
     
-    # Angular scaling
-    _ell, _lam = np.meshgrid(ells, lam)
-    f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / inst['d_max'])**2. \
-          / (8.*np.log(2.)))
+        # Angular scaling
+        _ell, _lam = np.meshgrid(ells, lam)
+        f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / inst['d_max'])**2. \
+              / (8.*np.log(2.)))
+
+        # Construct noise covariance
+        N_ij = f_ell * inst['sigma_T']**2. / dnu[:,None]
+        # FIXME: Is this definitely channel bandwidth, rather than total bandwidth?
+
+        # Apply large-scale cut
+        N_ij[np.where(_ell*_lam/(2.*np.pi) <= inst['d_min'])] = INF_NOISE
+
+    elif inst['type']=='dish':
+        # Angular scaling
+        _ell, _lam = np.meshgrid(ells, lam)
+        fwhm = 1.22*_lam/inst['D']
+        Bell = np.exp(-_ell*(_ell+1) * fwhm**2 / (16*np.log(2)))
+        N_ij = inst['sigma_T']**2 / dnu[:,None] / Bell**2 ## Ndish already put in there
+    else:
+        raise NotImplemented
     
-    # Construct noise covariance
-    N_ij = f_ell * inst['sigma_T']**2. / dnu[:,None]
-    # FIXME: Is this definitely channel bandwidth, rather than total bandwidth?
-    
-    # Apply large-scale cut
-    N_ij[np.where(_ell*_lam/(2.*np.pi) <= inst['d_min'])] = INF_NOISE
     return N_ij.T
 
 
@@ -289,12 +332,28 @@ def expand_diagonal(dmat):
     return mat
 
 
-def cache_save(blkname, blk):
+def hasharg(args):
+    if args==None:
+        return ""
+    st=""
+    for a in args:
+        if hasattr(a,"shape"):
+            st+=str(a.shape)
+        elif type(a) in [int, bool, str, float]:
+                st+=str(a)
+        elif type(a)==list:
+            st+=hasharg(a)
+        else:
+            st+='*'
+    return  "_"+str(hash(st))
+
+def cache_save(blkname, blk, args=None):
     """
     Save a block to a cache file.
     """
+
     if myid == 0:
-        np.save("%s_%s" % (prefix, blkname), blk)
+        np.save("%s_%s" % (prefix, blkname+hasharg(args)), blk)
 
 
 def cache_load(blkname, args=None, shape=None):
@@ -306,19 +365,25 @@ def cache_load(blkname, args=None, shape=None):
     res = None
     
     # Get expected shape of cached data
+    ## why would argument be the same as output?!
+
     if args is not None:
-        shape = [len(a) for a in args]
+        shape = None
+        ##shape = [len(a) for a in args]
     
     # Try to load cached data
+    fname="%s_%s.npy" % (prefix, blkname+hasharg(args))
+    status ("  Trying to load  "+fname)
     try:
-        res = np.load("%s_%s.npy" % (prefix, blkname))
+        res = np.load(fname)
         status("  Loaded from cache.")
         cache_hit = True
         
+        if shape is not None:
         # Sanity check on shape of cached data
-        assert res.shape[0] == shape[0]
-        assert res.shape[1] == shape[1]
-        if len(res.shape) > 2: assert res.shape[2] == shape[2]
+            assert res.shape[0] == shape[0]
+            assert res.shape[1] == shape[1]
+            if len(res.shape) > 2: assert res.shape[2] == shape[2]
         cache_valid = True
     except:
         pass
@@ -356,42 +421,51 @@ def cache(blkname, func, args, disabled=False):
             status("  Cache is from different setup. Overwriting.")
     res = func(*args)
     if not disabled:
-        cache_save(blkname, res)
+        cache_save(blkname, res, args)
     return res
 
 
-def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
+def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
     """
     Calculate derivative of covariance matrix w.r.t. photo-z parameters.
     """
+    if var not in ['sigma','delta']:
+        print "Vary either sigma_z or delta_z"
+        
     N1 = len(tracer1)
     N2 = len(tracer2)
     
     # Build new set of tracers with modified photo-z properties
     tracer1_p = []; tracer1_m = []
     for i in range(zmin_lsst.size):
-        tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0+dp)
-        tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0-dp)
+        if var=='sigma':
+            tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0+dp)
+            tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0-dp)
+        elif var=='delta':
+            tp, _ = selection_lsst(zmin_lsst[i]+dp, zmax_lsst[i]+dp, sigma_z0=sigma_z0)
+            tm, _ = selection_lsst(zmin_lsst[i]-dp, zmax_lsst[i]-dp, sigma_z0=sigma_z0)
+        else:
+            raise NotImplemented
         tracer1_p.append(tp); tracer1_m.append(tm)
     
     # Calculate photoz derivs
     status("derivs photoz")
     
     # Calculate +/- for each photoz bin; loop over tracers with +/- sigma_z0
-    dCij_dsigmaz0 = []
+    dCij_dvarz0 = []
     shape = (ells.size, N1+N2, N1+N2)
     for i in range(N1):
         
         # Check if this derivative exists in the cache
         cache_hit = False; cache_valid = False
         if myid == 0:
-            blkname = "deriv_sigmaz0_%d" % i
+            blkname = "deriv_"+var+"z0_%d" % i
             res, cache_hit, cache_valid = cache_load(blkname, shape=shape)
             
             # Append result to list if cache exists; otherwise, run through the 
             # whole calculation below
             if cache_hit and cache_valid:
-                dCij_dsigmaz0.append(res)
+                dCij_dvarz0.append(res)
         
         # Inform all processes about cache status
         cache_hit = comm.bcast(cache_hit, root=0)
@@ -452,10 +526,10 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, dp=1e-3):
         # into full matrix for derivative of covmat
         if myid == 0:
             res = (dC_p_all - dC_m_all) / (2.*dp)
-            dCij_dsigmaz0.append(res)
+            dCij_dvarz0.append(res)
             cache_save(blkname, res)
         
-    return dCij_dsigmaz0
+    return dCij_dvarz0
 
 
 def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
@@ -645,25 +719,30 @@ def fisher(ells, z_lsst, z_im):
     status("All processes finished covmat.")
     
     # Get Fisher derivatives
-    derivs_pz = deriv_photoz(ells, tracer1, tracer2, 
-                             zmin_lsst, zmax_lsst, 
-                             dp=1e-3)
+    derivs_pz_sigma = deriv_photoz(ells, tracer1, tracer2, 
+                                   zmin_lsst, zmax_lsst, 'sigma',
+                                   dp=1e-3)
+    derivs_pz_delta = deriv_photoz(ells, tracer1, tracer2, 
+                                   zmin_lsst, zmax_lsst, 'delta',
+                                   dp=1e-3)
+
     derivs_bias = deriv_bias(ells, tracer1, tracer2, 
                              (zmin_lsst, zmax_lsst), 
                              (zmin_im, zmax_im), 
                              dp=0.02)
     
     # Accounting for number of parameters
-    Nparam = len(derivs_pz)
-    
+    derivs_all=list(derivs_pz_sigma)+list(derivs_pz_delta)+list(derivs_bias)
+    Nparam = len(derivs_all)
+
     # Calculate Fisher matrix
     Fij_ell = np.zeros((ells.size, Nparam, Nparam))
     for l in range(len(ells)):
       for i in range(Nparam):
-        y_i = np.dot(Cinv[l], derivs_pz[i][l])
+        y_i = np.dot(Cinv[l], derivs_all[i][l])
         for j in range(Nparam):
-          y_j = np.dot(Cinv[l], derivs_pz[j][l])
-          Fij_ell[l,i,j] = (ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+          y_j = np.dot(Cinv[l], derivs_all[j][l])
+          Fij_ell[l,i,j] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
     
     comm.barrier()
     if myid == 0: return Fij_ell
@@ -702,6 +781,8 @@ def zbins_im_growing(zmin, zmax, dz0=0.05):
 
 
 if __name__ == '__main__':
+    ## caclulate sigma_T
+    inst=calc_sigmaT(inst)
     # Define angular scales and redshift bins
     ells = np.arange(5, 501)
     zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
@@ -718,10 +799,19 @@ if __name__ == '__main__':
         Fij = np.sum(Fij_ell, axis=0)
         np.save("%s_Fij" % prefix, Fij_ell)
 
-        P.matshow(np.linalg.inv(Fij))
+        C=np.linalg.inv(Fij)
+        P.matshow(C)
         P.colorbar()
         P.show()
-    
+
+        nbins=15
+        errs=np.sqrt(C.diagonal())
+        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:nbins],label='sigmaz')
+        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[nbins:2*nbins],label='deltaz')
+        P.legend()
+        P.semilogy()
+        P.show()
+        
     comm.barrier()
     exit()
     # Plotting
