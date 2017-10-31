@@ -806,7 +806,7 @@ if __name__ == '__main__':
     
     # Define angular scales and redshift bins
     ells = np.arange(5, 501)
-    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15
+    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
     # Build Fisher matrix
