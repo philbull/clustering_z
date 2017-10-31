@@ -3,12 +3,9 @@
 Plot cross-correlation between photometric survey and IM survey.
 """
 import numpy as np
-import pylab as P
 import pyccl as ccl
 from scipy.integrate import simps
 from scipy.special import erf
-import matplotlib.ticker
-#from multiprocessing import Pool
 import time
 from mpi4py import MPI
 
@@ -20,51 +17,52 @@ size = comm.Get_size()
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
 
+# Settings
+IGNORE_PHOTOZ_CORR = False # Ignore correlations between photo-z bins?
+
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
 
+# Assumed sigma_z0 for LSST
+sigma_z0 = 0.03
 
+# Example HIRAX interferometer
 inst = {
-    # Interferometer parameters
-    'name': "hrx",
-    'type': "interferometer",
+    'name':     "hrx",
+    'type':     "interferometer",
     'd_min':    6., # m
-    'd_max':    32*6.*np.sqrt(2), # m
-    'Ndish':   32*32,
-    'fsky' : 0.4,
-    'Tsys' : 50, # in K
-    'intgtime' : 2.8e4,
+    'd_max':    32.*6.*np.sqrt(2), # m
+    'Ndish':    32*32,
+    'fsky' :    0.4,
+    'Tsys' :    50., # in K
+    'ttot':     2.8e4, # hrs
     'fsky_overlap': 0.4
 }
 
+# GBT single-dish, 7-beam receiver
 inst = {
-    # Interferometer parameters
-    'name': "GBT",
-    'type': "dish",
-    'D':    100,
-    'Ndish': 7,
-    'fsky' : 0.15,
-    'Tsys' : 30, # in K
-    'intgtime' : 3.2e4,
+    'name':     "GBT",
+    'type':     "dish",
+    'D':        100.,
+    'Ndish':    7,
+    'fsky':     0.15,
+    'Tsys':     30., # in K
+    'ttot':     3.2e4, # hrs
     'fsky_overlap': 0.15
 }
 
+# Set name prefix for this run
+prefix = inst['name'] + str(hash(frozenset(inst.items())))
 
 
-prefix = inst['name']+str(hash(frozenset(inst.items())))
 
-
-
-# FIXME
-sigma_z0 = 0.03
-
-
-def calc_sigmaT(inst):
-    ## 1000 (mK in  K) /sqrt(1e6 MHz in Hz) = 1
-    sigma_T=np.sqrt(inst['Tsys']**2*np.pi*4*inst['fsky']/(inst['intgtime']*3600)/inst['Ndish'])
-    inst['sigma_T']=sigma_T
-    print "Sigma_T=",sigma_T
-    return inst
+def sigmaT(inst):
+    """
+    Calculate noise RMS, sigma_T, for an instrumental setup. In mK.MHz.
+    """
+    sigmaT2 = 4.*np.pi * inst['fsky'] * inst['Tsys']**2 \
+             / (inst['ttot']*3600. * inst['Ndish'])
+    return np.sqrt(sigmaT2)
 
     
 def status(msg):
@@ -151,41 +149,43 @@ def photoz_selection(z, zmin, zmax, dNdz_func, sigma_z0):
     return dNdz * pz, n_tot
 
 
-def calculate_block_noise_int(ells, zmin, zmax):
+def calculate_block_noise_im(ells, zmin, zmax):
     """
-    Approximate noise expression for a radio interferometer, using Eq. 8 of 
-    Alonso et al.
+    Noise expressions for a 21cm IM experiment, using expressions from 
+    Alonso et al. 
     """
     # Frequency scaling
     zc = 0.5 * (zmin + zmax)
     nu = 1420. / (1. + zc)
     lam = (C * 1e3) / (nu * 1e6) # wavelength in m
     
-    # Bin widths and angular cutoffs
+    # Bin widths and grid in SH wavenumber / wavelength
     dnu = 1420. * (1./(1. + zmin) - 1./(1. + zmax))
-
-    if inst['type']=='interferometer':
+    _ell, _lam = np.meshgrid(ells, lam)
     
+    # Use approximate interferometer noise expression, from Eq. 8 of Alonso.
+    if inst['type'] == 'interferometer':
         # Angular scaling
-        _ell, _lam = np.meshgrid(ells, lam)
         f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / inst['d_max'])**2. \
               / (8.*np.log(2.)))
 
         # Construct noise covariance
-        N_ij = f_ell * inst['sigma_T']**2. / dnu[:,None]
+        N_ij = f_ell * sigmaT(inst)**2. / dnu[:,None]
         # FIXME: Is this definitely channel bandwidth, rather than total bandwidth?
 
         # Apply large-scale cut
         N_ij[np.where(_ell*_lam/(2.*np.pi) <= inst['d_min'])] = INF_NOISE
 
-    elif inst['type']=='dish':
-        # Angular scaling
-        _ell, _lam = np.meshgrid(ells, lam)
-        fwhm = 1.22*_lam/inst['D']
-        Bell = np.exp(-_ell*(_ell+1) * fwhm**2 / (16*np.log(2)))
-        N_ij = inst['sigma_T']**2 / dnu[:,None] / Bell**2 ## Ndish already put in there
+    elif inst['type'] == 'dish':
+        # Single-dish experiment noise expression
+        # (Ndish already included in sigma_T expression)
+        fwhm = 1.22 * _lam / inst['D']
+        B_l = np.exp(-_ell*(_ell+1) * fwhm**2. / (16.*np.log(2.)))
+        N_ij = sigmaT(inst)**2. / dnu[:,None] / B_l**2.
+        
     else:
-        raise NotImplemented
+        raise NotImplementedError("Unrecognised nstrument type '%s'." 
+                                  % inst['type'])
     
     return N_ij.T
 
@@ -299,7 +299,7 @@ def calculate_block_gen(ells, tracer1, tracer2):
     return Cij_all
 
 
-def calculate_block_diag(ells, tracer1):
+def calculate_block_diag(ells, tracer1, tracer2=None):
     """
     Calculate an assumed-diagonal block of auto-correlations.
     """
@@ -333,27 +333,30 @@ def expand_diagonal(dmat):
 
 
 def hasharg(args):
-    if args==None:
+    """
+    Build a hash from the shapes/sizes of a set of arguments.
+    """
+    if args == None:
         return ""
-    st=""
+    st = ""
     for a in args:
-        if hasattr(a,"shape"):
-            st+=str(a.shape)
+        if hasattr(a, "shape"):
+            st += str(a.shape)
         elif type(a) in [int, bool, str, float]:
-                st+=str(a)
-        elif type(a)==list:
-            st+=hasharg(a)
+                st += str(a)
+        elif type(a) == list:
+            st += hasharg(a)
         else:
-            st+='*'
-    return  "_"+str(hash(st))
+            st += '*'
+    return  "_" + str(abs(hash(st)))
+
 
 def cache_save(blkname, blk, args=None):
     """
     Save a block to a cache file.
     """
-
     if myid == 0:
-        np.save("%s_%s" % (prefix, blkname+hasharg(args)), blk)
+        np.save("%s_%s" % (prefix, blkname + hasharg(args)), blk)
 
 
 def cache_load(blkname, args=None, shape=None):
@@ -365,15 +368,11 @@ def cache_load(blkname, args=None, shape=None):
     res = None
     
     # Get expected shape of cached data
-    ## why would argument be the same as output?!
-
-    if args is not None:
-        shape = None
-        ##shape = [len(a) for a in args]
+    if args is not None: shape = None
     
     # Try to load cached data
-    fname="%s_%s.npy" % (prefix, blkname+hasharg(args))
-    status ("  Trying to load  "+fname)
+    fname="%s_%s.npy" % (prefix, blkname + hasharg(args))
+    status ("  Trying to load %s from cache." % fname)
     try:
         res = np.load(fname)
         status("  Loaded from cache.")
@@ -386,6 +385,8 @@ def cache_load(blkname, args=None, shape=None):
             if len(res.shape) > 2: assert res.shape[2] == shape[2]
         cache_valid = True
     except:
+        #raise
+        status("  Failed to load from cache.")
         pass
     
     return res, cache_hit, cache_valid
@@ -429,21 +430,26 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
     """
     Calculate derivative of covariance matrix w.r.t. photo-z parameters.
     """
-    if var not in ['sigma','delta']:
-        print "Vary either sigma_z or delta_z"
-        
+    # Check to make sure valid parameter name was specified
+    if var not in ['sigma', 'delta']:
+        raise ValueError("deriv_photoz() can vary either 'sigma' (sigma_z) "
+                         "or 'delta_z' (Delta z).")
     N1 = len(tracer1)
     N2 = len(tracer2)
     
     # Build new set of tracers with modified photo-z properties
     tracer1_p = []; tracer1_m = []
     for i in range(zmin_lsst.size):
-        if var=='sigma':
-            tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0+dp)
-            tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0-dp)
-        elif var=='delta':
-            tp, _ = selection_lsst(zmin_lsst[i]+dp, zmax_lsst[i]+dp, sigma_z0=sigma_z0)
-            tm, _ = selection_lsst(zmin_lsst[i]-dp, zmax_lsst[i]-dp, sigma_z0=sigma_z0)
+        if var == 'sigma':
+            tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+                                   sigma_z0=sigma_z0+dp)
+            tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+                                   sigma_z0=sigma_z0-dp)
+        elif var == 'delta':
+            tp, _ = selection_lsst(zmin_lsst[i]+dp, zmax_lsst[i]+dp,
+                                   sigma_z0=sigma_z0)
+            tm, _ = selection_lsst(zmin_lsst[i]-dp, zmax_lsst[i]-dp, 
+                                   sigma_z0=sigma_z0)
         else:
             raise NotImplemented
         tracer1_p.append(tp); tracer1_m.append(tm)
@@ -459,7 +465,7 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
         # Check if this derivative exists in the cache
         cache_hit = False; cache_valid = False
         if myid == 0:
-            blkname = "deriv_"+var+"z0_%d" % i
+            blkname = "deriv_%sz0_%d" % (var, i)
             res, cache_hit, cache_valid = cache_load(blkname, shape=shape)
             
             # Append result to list if cache exists; otherwise, run through the 
@@ -467,7 +473,8 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
             if cache_hit and cache_valid:
                 dCij_dvarz0.append(res)
         
-        # Inform all processes about cache status
+        # Inform all processes about cache status; skip to next i value if 
+        # cache was loaded successfully
         cache_hit = comm.bcast(cache_hit, root=0)
         cache_valid = comm.bcast(cache_valid, root=0)
         if cache_hit and cache_valid:
@@ -481,20 +488,26 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
         status("  deriv photoz-photoz %d / %d" % (i, N1))
         comm.barrier()
         
-        for j in range(N1):
-            if j % size != myid: continue
-            print "    Bin %d / %d (worker %d)" % (j, N1, myid)
-            
-            # Calculate finite difference deriv.
-            trp = tracer1[j] if i != j else tracer1_p[j]
-            trm = tracer1[j] if i != j else tracer1_m[j]
-            dC_p[:,i,j] = dC_p[:,j,i] \
-                = ccl.angular_cl(cosmo, tracer1_p[i], trp, ells)
-            dC_m[:,i,j] = dC_m[:,j,i] \
-                = ccl.angular_cl(cosmo, tracer1_m[i], trm, ells)
-        
-        # FIXME: Derivative of pz-pz noise term, along the diagonal?
-        # TODO: Should this be in there?
+        # Check if correlations should be ignored between photo-z bins
+        if IGNORE_PHOTOZ_CORR:
+            # Calculate the derivative only along the diagonal
+            dC_p[:,:N1,:N1] = expand_diagonal( 
+                                    calculate_block_diag(ells, tracer1_p) )
+            dC_m[:,:N1,:N1] = expand_diagonal( 
+                                    calculate_block_diag(ells, tracer1_m) )
+        else:
+            # Calculate the full dense photoz-photoz matrix derivative
+            for j in range(N1):
+                if j % size != myid: continue
+                print "    Bin %d / %d (worker %d)" % (j, N1, myid)
+                
+                # Calculate finite difference deriv.
+                trp = tracer1[j] if i != j else tracer1_p[j]
+                trm = tracer1[j] if i != j else tracer1_m[j]
+                dC_p[:,i,j] = dC_p[:,j,i] \
+                    = ccl.angular_cl(cosmo, tracer1_p[i], trp, ells)
+                dC_m[:,i,j] = dC_m[:,j,i] \
+                    = ccl.angular_cl(cosmo, tracer1_m[i], trm, ells)
         
         # Get angular Cl for this bin crossed with IM bins
         status("  deriv photoz-im %d / %d" % (i, N1))
@@ -627,8 +640,6 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im,
     Nij_pz_pz = 0.
     Fij_im_im = 0.
     
-    # FIXME: This has to ignore the cached files when being called from the deriv function
-    
     # Calculate IM auto block
     if 'Sij_im_im' not in exclude:
         status("signal im-im")
@@ -639,9 +650,14 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im,
     # Calculate LSST auto block
     if 'Sij_pz_pz' not in exclude:
         status("signal photoz-photoz")
+        if IGNORE_PHOTOZ_CORR: 
+            calculate_block_photoz = calculate_block_diag
+        else:
+            calculate_block_photoz = calculate_block_gen
         Sij_pz_pz = cache('Sij_pz_pz', 
-                          calculate_block_gen, 
+                          calculate_block_photoz, 
                           (ells, tracer1, tracer1), disabled=nocache)
+            
     
     # Calculate cross-tracer signal block
     if 'Sij_pz_im' not in exclude:
@@ -654,7 +670,7 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im,
     if 'Nij_im_im' not in exclude:
         status("noise im-im")
         Nij_im_im = cache('Nij_im_im', 
-                          calculate_block_noise_int, 
+                          calculate_block_noise_im, 
                           (ells, zmin_im, zmax_im), disabled=nocache)
     
     # Calculate LSST noise auto block
@@ -716,33 +732,38 @@ def fisher(ells, z_lsst, z_im):
     if myid == 0:
         Cinv = invert_covmat(cov)
     comm.barrier()
-    status("All processes finished covmat.")
+    status("All processes finished covariance calculation.")
     
     # Get Fisher derivatives
+    status("Calculating Fisher derivatives...")
     derivs_pz_sigma = deriv_photoz(ells, tracer1, tracer2, 
                                    zmin_lsst, zmax_lsst, 'sigma',
                                    dp=1e-3)
     derivs_pz_delta = deriv_photoz(ells, tracer1, tracer2, 
                                    zmin_lsst, zmax_lsst, 'delta',
                                    dp=1e-3)
-
+    """
     derivs_bias = deriv_bias(ells, tracer1, tracer2, 
                              (zmin_lsst, zmax_lsst), 
                              (zmin_im, zmax_im), 
                              dp=0.02)
-    
+    """
     # Accounting for number of parameters
-    derivs_all=list(derivs_pz_sigma)+list(derivs_pz_delta)+list(derivs_bias)
+    derivs_all = list(derivs_pz_sigma) \
+               + list(derivs_pz_delta)
+               #+ list(derivs_bias)
     Nparam = len(derivs_all)
 
     # Calculate Fisher matrix
-    Fij_ell = np.zeros((ells.size, Nparam, Nparam))
-    for l in range(len(ells)):
-      for i in range(Nparam):
-        y_i = np.dot(Cinv[l], derivs_all[i][l])
-        for j in range(Nparam):
-          y_j = np.dot(Cinv[l], derivs_all[j][l])
-          Fij_ell[l,i,j] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+    if myid == 0:
+        Fij_ell = np.zeros((ells.size, Nparam, Nparam))
+        for l in range(len(ells)):
+          for i in range(Nparam):
+            y_i = np.dot(Cinv[l], derivs_all[i][l])
+            for j in range(Nparam):
+              y_j = np.dot(Cinv[l], derivs_all[j][l])
+              Fij_ell[l,i,j] = inst['fsky_overlap'] * (ells[l] + 0.5) \
+                             * np.trace(np.dot(y_i, y_j))
     
     comm.barrier()
     if myid == 0: return Fij_ell
@@ -779,13 +800,13 @@ def zbins_im_growing(zmin, zmax, dz0=0.05):
     return zmin, zmax
 
 
-
+# Example run/plotting script
 if __name__ == '__main__':
-    ## caclulate sigma_T
-    inst=calc_sigmaT(inst)
+    import pylab as P
+    
     # Define angular scales and redshift bins
     ells = np.arange(5, 501)
-    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
+    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
     # Build Fisher matrix
@@ -799,12 +820,12 @@ if __name__ == '__main__':
         Fij = np.sum(Fij_ell, axis=0)
         np.save("%s_Fij" % prefix, Fij_ell)
 
-        C=np.linalg.inv(Fij)
+        C = np.linalg.inv(Fij)
         P.matshow(C)
         P.colorbar()
         P.show()
 
-        nbins=15
+        nbins=zmin_lsst.size
         errs=np.sqrt(C.diagonal())
         P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:nbins],label='sigmaz')
         P.plot((zmin_lsst+zmax_lsst)/2.0,errs[nbins:2*nbins],label='deltaz')
@@ -813,78 +834,3 @@ if __name__ == '__main__':
         P.show()
         
     comm.barrier()
-    exit()
-    # Plotting
-    P.subplot(111)
-    P.plot(ell, Cij[:,0,7], lw=1.8, 
-           label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[0]))
-    P.plot(ell, Cij[:,0,8], lw=1.8, 
-           label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[1]))
-    P.plot(ell, Cij[:,0,9], lw=1.8, 
-           label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[2]))
-    P.plot(ell, Cij[:,0,10], lw=1.8, 
-           label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[3]))
-    P.plot(ell, Cij[:,0,11], lw=1.8, 
-           label="z_lsst = %2.2f, z_im = %2.2f" % (zmin_lsst[0], zmin_im[4]))
-
-    P.plot(ell, Cij[:,7,7], 'k-', lw=1.8)
-
-    P.yscale('log')
-    #P.ylim(())
-
-    P.legend(loc='lower right', frameon=False)
-    P.tight_layout()
-    P.show()
-    exit()
-
-    # Plot correlation matrix for a given ell
-    i_ell = 15
-    print corrmat(Cij[i_ell])[0,:]
-    print corrmat(Cij[i_ell])[-1,:]
-    P.matshow(corrmat(Cij[:,0,7]), cmap='RdBu', vmin=-1., vmax=1.)
-    P.axhline(len(tracer1)-0.5, color='k', ls='dashed', lw=1.8)
-    P.axvline(len(tracer1)-0.5, color='k', ls='dashed', lw=1.8)
-    P.colorbar()
-    P.show()
-
-    """
-    # Calculate x-corr across many spectroscopic redshift bins
-    ell = np.arange(4, 100)
-    z_min = np.arange(0.2, 0.8, 0.02)
-    z_max = z_min + (z_min[1] - z_min[0])
-    zc = 0.5 * (z_min + z_max)
-    xcorr = np.zeros((ell.size, z_min.size))
-
-    # Calculate angular cross-power in each z_spec bin
-    for i in range(z_min.size):
-        print i
-        z_im, tomo_im, bz_im, n_im = selection_im(z_min[i], z_max[i], debug=True)
-        cls = ccl.angular_cl(cosmo, n_lsst, n_im, ell)
-        xcorr[:,i] = cls * np.sqrt(2.*ell + 1.)
-
-    idx = np.where(xcorr == np.max(xcorr))
-    print "l_max = %d" % ell[idx[0]]
-    print "z_max = %2.2f" % zc[idx[1]]
-
-
-    z_im, tomo_im, bz_im, n_im = selection_im(z_min[i], z_max[i])
-    cls = ccl.angular_cl(cosmo, n_lsst, n_im, ell)
-
-
-
-    # Plot x-corr
-    P.matshow(xcorr / 1e-6, cmap='bone', aspect='auto', origin='lower',
-              extent=(z_min[0], z_max[-1], ell[0], ell[-1]))
-
-    # Set axis labels
-    P.gca().xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(0.1))
-    P.tick_params(axis='both', which='major', labelsize=18, size=8.,
-                  width=1.25, pad=8., labelbottom='on', labeltop='off')
-
-    P.ylabel(r'$\ell$', fontsize=20., labelpad=10.)
-    P.xlabel(r'$z_{\rm spec}$', fontsize=20.)
-
-    P.colorbar()
-    #P.tight_layout()
-    P.show()
-    """
