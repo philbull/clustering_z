@@ -7,6 +7,7 @@ import pylab as P
 import pyccl as ccl
 from scipy.integrate import simps
 from scipy.special import erf
+from scipy.interpolate import interp1d
 import matplotlib.ticker
 #from multiprocessing import Pool
 import time
@@ -150,6 +151,18 @@ def photoz_selection(z, zmin, zmax, dNdz_func, sigma_z0):
     # Return unnormed selection function and total galaxy number density
     return dNdz * pz, n_tot
 
+def calculate_nonlinear_ell (zc):
+    dist=ccl.comoving_angular_distance(cosmo, 1./(1+zc))
+    gf=ccl.growth_factor(cosmo,1/(1+zc))
+    targetSigma=1.0/gf #SigmaR returns sigma^2 at z=0, but we want it at z=zc
+    Rs=np.arange(1,20)
+    sigmas2=ccl.sigmaR(cosmo,Rs)
+    RNl=interp1d(sigmas2,Rs)(targetSigma)
+    kNl=2./RNl  # From RNl to kNl
+    ellNl = dist*kNl
+    ellNl[ellNl>2000]=2000
+    status ("At z="+repr(zc)+" kNl="+repr(kNl)+ " ellNl="+repr(ellNl))
+    return ellNl
 
 def calculate_block_noise_int(ells, zmin, zmax):
     """
@@ -160,6 +173,9 @@ def calculate_block_noise_int(ells, zmin, zmax):
     zc = 0.5 * (zmin + zmax)
     nu = 1420. / (1. + zc)
     lam = (C * 1e3) / (nu * 1e6) # wavelength in m
+
+    #Calculate ell at which nonlinear stuff matters:
+    lmax = calculate_nonlinear_ell (zc)
     
     # Bin widths and angular cutoffs
     dnu = 1420. * (1./(1. + zmin) - 1./(1. + zmax))
@@ -186,7 +202,9 @@ def calculate_block_noise_int(ells, zmin, zmax):
         N_ij = inst['sigma_T']**2 / dnu[:,None] / Bell**2 ## Ndish already put in there
     else:
         raise NotImplemented
-    
+
+    for i,clmax in enumerate(lmax):
+        N_ij[i,np.where(ells>clmax)] = INF_NOISE
     return N_ij.T
 
 
@@ -784,7 +802,7 @@ if __name__ == '__main__':
     ## caclulate sigma_T
     inst=calc_sigmaT(inst)
     # Define angular scales and redshift bins
-    ells = np.arange(5, 501)
+    ells = np.arange(5, 2001)
     zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
