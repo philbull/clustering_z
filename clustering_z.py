@@ -21,7 +21,7 @@ size = comm.Get_size()
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
 LMAX=2000
-perPZ=False
+perPZ=True
 NBINS=15
 
 # Set up cosmology and LSST instrumental specs
@@ -796,8 +796,9 @@ def fisher(ells, z_lsst, z_im):
                   y_i = np.dot(Cinv[l], derivs_all[i][l])
                   for j in range(i,4):
                       y_j = np.dot(Cinv[l], derivs_all[j][l])
-                      Fij_ell[l,i*Nzlsst+bi,j*Nzlsst+bi] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
-                      Fij_ell[l,j,i] = Fij_ell[l,i,j] 
+                      xi, xj = i*Nzlsst+bi, j*Nzlsst+bi
+                      Fij_ell[l, xi, xj] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+                      Fij_ell[l, xj, xi] = Fij_ell[l,xi,xj] 
                   
     
     else:
