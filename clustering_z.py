@@ -20,6 +20,9 @@ size = comm.Get_size()
 
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
+LMAX=2000
+perPZ=False
+NBINS=15
 
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
@@ -731,9 +734,6 @@ def fisher(ells, z_lsst, z_im):
     
     # Build covariance matrix and invert
     cov = build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im)
-    if myid == 0:
-        Cinv = invert_covmat(cov)
-    comm.barrier()
     status("All processes finished covmat.")
     
     # Get Fisher derivatives
@@ -749,23 +749,75 @@ def fisher(ells, z_lsst, z_im):
                              (zmin_im, zmax_im), 
                              dp=0.02)
     
-    # Accounting for number of parameters
-    derivs_all=list(derivs_pz_sigma)+list(derivs_pz_delta)+list(derivs_bias)
-    Nparam = len(derivs_all)
 
-    # Calculate Fisher matrix
-    Fij_ell = np.zeros((ells.size, Nparam, Nparam))
-    for l in range(len(ells)):
-      for i in range(Nparam):
-        y_i = np.dot(Cinv[l], derivs_all[i][l])
-        for j in range(Nparam):
-          y_j = np.dot(Cinv[l], derivs_all[j][l])
-          Fij_ell[l,i,j] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+    if myid!=0:
+        comm.barrier()
+        return None
+    
+    if perPZ:
+        zcl = (zmin_lsst+zmax_lsst)/2
+            # Calculate Fisher matrix
+        
+        Nzlsst=NBINS
+        NzIm=len(zmin_im)            
+        Nparam=Nzlsst*4 # sigma,bias, bl,bi
+        Fij_ell=np.zeros((ells.size, Nparam, Nparam))
+        for bi,zc in enumerate(zcl):
+            status ("Doing perPZ %i/%i"%(bi,Nzlsst))
+            ## Let's see which bins do we want from IM
+            sigma_z = sigma_z0 * (1. + zc)
+            indx=np.where((zmax_im>zc-3*sigma_z) & (zmin_im<zc+3*sigma_z))[0]
+            #print zmin_im
+            #Eprint zmax_im
+            print zc-3*sigma_z, zc+3*sigma_z
+            print indx,'indx'
+            curcov=np.array(cov)
+            
+            for k in range(Nzlsst):
+                if k==bi:
+                    continue
+                curcov[:,k,:]=0
+                curcov[:,:,k]=0
+                curcov[:,k,k]=INF_NOISE
+            for k in range(NzIm):
+                if k in indx:
+                    continue
+                curcov[:,Nzlsst+k,:]=0
+                curcov[:,:,Nzlsst+k,]=0
+                curcov[:,Nzlsst+k,Nzlsst+k]=INF_NOISE
+                           
+                Cinv = invert_covmat(curcov)
+
+            # Accounting for number of parameters
+            derivs_all=[derivs_pz_sigma[bi],derivs_pz_delta[bi]]+list(derivs_bias)
+
+            for l in range(len(ells)):
+              for i in range(4):
+                  y_i = np.dot(Cinv[l], derivs_all[i][l])
+                  for j in range(4):
+                      y_j = np.dot(Cinv[l], derivs_all[j][l])
+                      Fij_ell[l,i*Nzlsst+bi,j*Nzlsst+bi] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+                  
+    
+    else:
+        Cinv = invert_covmat(cov)
+
+        # Accounting for number of parameters
+        derivs_all=list(derivs_pz_sigma)+list(derivs_pz_delta)+list(derivs_bias)
+        Nparam = len(derivs_all)
+
+        # Calculate Fisher matrix
+        Fij_ell = np.zeros((ells.size, Nparam, Nparam))
+        for l in range(len(ells)):
+          for i in range(Nparam):
+            y_i = np.dot(Cinv[l], derivs_all[i][l])
+            for j in range(Nparam):
+              y_j = np.dot(Cinv[l], derivs_all[j][l])
+              Fij_ell[l,i,j] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
     
     comm.barrier()
-    if myid == 0: return Fij_ell
-    return None
-
+    return Fij_ell
+    
 
 def zbins_lsst_alonso(nbins=15):
     """
@@ -802,8 +854,8 @@ if __name__ == '__main__':
     ## caclulate sigma_T
     inst=calc_sigmaT(inst)
     # Define angular scales and redshift bins
-    ells = np.arange(5, 2001)
-    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
+    ells = np.arange(5, LMAX+1)
+    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=NBINS)
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
     # Build Fisher matrix
@@ -822,10 +874,9 @@ if __name__ == '__main__':
         P.colorbar()
         P.show()
 
-        nbins=15
         errs=np.sqrt(C.diagonal())
-        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:nbins],label='sigmaz')
-        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[nbins:2*nbins],label='deltaz')
+        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:NBINS],label='sigmaz')
+        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[NBINS:2*NBINS],label='deltaz')
         P.legend()
         P.semilogy()
         P.show()
