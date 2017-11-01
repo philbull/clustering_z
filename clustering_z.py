@@ -25,6 +25,7 @@ cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
 
 # Assumed sigma_z0 for LSST
 sigma_z0 = 0.03
+KMAX0 = 0.2 # Mpc^-1
 
 # Example HIRAX interferometer
 inst = {
@@ -94,6 +95,19 @@ def bias_HI(z):
     b_HI(z), obtained using a simple polynomial fit to Mario's data.
     """
     return 6.6655e-01 + 1.7765e-01*z + 5.0223e-02*z**2.
+
+
+def lmax_for_redshift(cosmo, z, kmax0=0.2):
+    """
+    Calculates an lmax for a bin at a given redshift. This is found by taking 
+    some k_max at z=0, scaling it by the growth factor, and converting to an 
+    ell value.
+    N.B. kmax0 = k_max(z=0) is assumed to be in Mpc^-1 units.
+    """
+    r = ccl.comoving_radial_distance(cosmo, 1./(1.+z))
+    D = ccl.growth_factor(cosmo, 1./(1.+z))
+    lmax = r * D * kmax0
+    return lmax
 
 
 def dNdz_lsst(z):
@@ -184,13 +198,23 @@ def calculate_block_noise_im(ells, zmin, zmax):
         N_ij = sigmaT(inst)**2. / dnu[:,None] / B_l**2.
         
     else:
-        raise NotImplementedError("Unrecognised nstrument type '%s'." 
+        raise NotImplementedError("Unrecognised instrument type '%s'." 
                                   % inst['type'])
     
-    return N_ij.T
+    # Transpose to get correct shape
+    N_ij = N_ij.T
+    
+    # Apply kmax cutoff
+    lmax = lmax_for_redshift(cosmo, zmax, kmax0=KMAX0)
+    for i in range(N_ij.shape[1]):
+        #print "im zmax = %3.2f, lmax = %d" % (zmax[i], lmax[i])
+        idx = np.where(ells > lmax[i])
+        N_ij[idx,i] = INF_NOISE
+    
+    return 
 
 
-def calculate_block_noise_lsst(ells, nz_lsst):
+def calculate_block_noise_lsst(ells, zmin, zmax, nz_lsst):
     """
     Shot noise in each redshift bin, taken by integrating dN/dz over the 
     selection function for the bin.
@@ -199,6 +223,14 @@ def calculate_block_noise_lsst(ells, nz_lsst):
     N_ij = np.zeros((ells.size, len(nz_lsst)))
     for i, nz in enumerate(nz_lsst):
         N_ij[:,i] = np.ones(ells.size) / nz
+    
+    # Apply kmax cutoff
+    lmax = lmax_for_redshift(cosmo, zmax, kmax0=KMAX0)
+    for i in range(N_ij.shape[1]):
+        #print "pz zmax = %3.2f, lmax = %d" % (zmax[i], lmax[i])
+        idx = np.where(ells > lmax[i])
+        N_ij[idx,i] = INF_NOISE
+    
     return N_ij
     
 
@@ -576,12 +608,14 @@ def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     status("deriv bias1")
     Cij_bias1p = cache('deriv_bias1p', 
                        build_covmat, 
-                       (ells, tracer1_p, tracer2, dummy1, dummy2, dummy3, 
+                       (ells, tracer1_p, tracer2, 
+                       (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     Cij_bias1m = cache('deriv_bias1m', 
                        build_covmat, 
-                       (ells, tracer1_m, tracer2, dummy1, dummy2, dummy3, 
+                       (ells, tracer1_m, tracer2, 
+                       (dummy1, dummy1, dummy1), (dummy2, dummy3),  
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     
@@ -590,12 +624,14 @@ def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     # nz_lsst, zmin_im, zmax_im
     Cij_bias2p = cache('deriv_bias2p', 
                        build_covmat, 
-                       (ells, tracer1, tracer2_p, dummy1, dummy2, dummy3,  
+                       (ells, tracer1, tracer2_p, 
+                       (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     Cij_bias2m = cache('deriv_bias2m', 
                        build_covmat, 
-                       (ells, tracer1, tracer2_m, dummy1, dummy2, dummy3, 
+                       (ells, tracer1, tracer2_m, 
+                       (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_pz_pz', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     
@@ -618,8 +654,8 @@ def invert_covmat(cov):
     return icov
 
 
-def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im, 
-                 exclude=[], nocache=False):
+def build_covmat(ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[], 
+                 nocache=False):
     """
     Build full covariance matrix from individual blocks.
     N.B. tracer2 should be the IM tracer!
@@ -627,6 +663,8 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im,
     # Number of tracer redshift bins
     N1 = len(tracer1)
     N2 = len(tracer2)
+    zmin_lsst, zmax_lsst, nz_lsst = bins_lsst
+    zmin_im, zmax_im = bins_im
     
     # Define angular scales and redshift bins
     if zmin_im is not None and zmax_im is not None:
@@ -669,16 +707,20 @@ def build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im,
     # Calculate IM noise auto block
     if 'Nij_im_im' not in exclude:
         status("noise im-im")
-        Nij_im_im = cache('Nij_im_im', 
-                          calculate_block_noise_im, 
-                          (ells, zmin_im, zmax_im), disabled=nocache)
+        #Nij_im_im = cache('Nij_im_im', 
+        #                  calculate_block_noise_im, 
+        #                  (ells, zmin_im, zmax_im), disabled=nocache)
+        Nij_im_im = calculate_block_noise_im(ells, zmin_im, zmax_im)
     
     # Calculate LSST noise auto block
     if 'Nij_pz_pz' not in exclude:
         status("noise photoz-photoz")
-        Nij_pz_pz = cache('Nij_pz_pz', 
-                          calculate_block_noise_lsst, 
-                          (ells, nz_lsst), disabled=nocache)
+        #Nij_pz_pz = cache('Nij_pz_pz', 
+        #                  calculate_block_noise_lsst, 
+        #                  (ells, zmin_lsst, zmax_lsst, nz_lsst), disabled=nocache)
+        Nij_pz_pz = calculate_block_noise_lsst(ells, zmin_lsst, zmax_lsst, nz_lsst)
+    
+    exit()
     
     # Calculate IM foreground residual auto block
     #if 'Fij_im_im' not in exclude:
@@ -728,7 +770,9 @@ def fisher(ells, z_lsst, z_im):
                 for i in range(zmin_im.size) ]
     
     # Build covariance matrix and invert
-    cov = build_covmat(ells, tracer1, tracer2, nz_lsst, zmin_im, zmax_im)
+    cov = build_covmat(ells, tracer1, tracer2, 
+                       bins_lsst=(zmin_lsst, zmax_lsst, nz_lsst), 
+                       bins_im=(zmin_im, zmax_im))
     if myid == 0:
         Cinv = invert_covmat(cov)
     comm.barrier()
@@ -755,6 +799,7 @@ def fisher(ells, z_lsst, z_im):
     Nparam = len(derivs_all)
 
     # Calculate Fisher matrix
+    status("Combining blocks into Fisher matrix...")
     if myid == 0:
         Fij_ell = np.zeros((ells.size, Nparam, Nparam))
         for l in range(len(ells)):
