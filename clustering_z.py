@@ -786,7 +786,7 @@ def fisher(ells, z_lsst, z_im):
                 curcov[:,:,Nzlsst+k,]=0
                 curcov[:,Nzlsst+k,Nzlsst+k]=INF_NOISE
                            
-                Cinv = invert_covmat(curcov)
+            Cinv = invert_covmat(curcov)
 
             # Accounting for number of parameters
             derivs_all=[derivs_pz_sigma[bi],derivs_pz_delta[bi]]+list(derivs_bias)
@@ -794,9 +794,10 @@ def fisher(ells, z_lsst, z_im):
             for l in range(len(ells)):
               for i in range(4):
                   y_i = np.dot(Cinv[l], derivs_all[i][l])
-                  for j in range(4):
+                  for j in range(i,4):
                       y_j = np.dot(Cinv[l], derivs_all[j][l])
                       Fij_ell[l,i*Nzlsst+bi,j*Nzlsst+bi] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
+                      Fij_ell[l,j,i] = Fij_ell[l,i,j] 
                   
     
     else:
@@ -811,10 +812,12 @@ def fisher(ells, z_lsst, z_im):
         for l in range(len(ells)):
           for i in range(Nparam):
             y_i = np.dot(Cinv[l], derivs_all[i][l])
-            for j in range(Nparam):
+            for j in range(i,Nparam):
               y_j = np.dot(Cinv[l], derivs_all[j][l])
               Fij_ell[l,i,j] = inst['fsky_overlap']*(ells[l] + 0.5) * np.trace(np.dot(y_i, y_j))
-    
+              Fij_ell[l,j,i] = Fij_ell[l,i,j] 
+
+              
     comm.barrier()
     return Fij_ell
     
