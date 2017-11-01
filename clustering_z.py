@@ -720,8 +720,6 @@ def build_covmat(ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[],
         #                  (ells, zmin_lsst, zmax_lsst, nz_lsst), disabled=nocache)
         Nij_pz_pz = calculate_block_noise_lsst(ells, zmin_lsst, zmax_lsst, nz_lsst)
     
-    exit()
-    
     # Calculate IM foreground residual auto block
     #if 'Fij_im_im' not in exclude:
         #status("foreground im-im")
