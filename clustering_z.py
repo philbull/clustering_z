@@ -17,6 +17,7 @@ size = comm.Get_size()
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
 
+"""
 # Settings
 IGNORE_PHOTOZ_CORR = False # Ignore correlations between photo-z bins?
 
@@ -55,7 +56,7 @@ inst = {
 # Set name prefix for this run
 prefix = inst['name'] + str(hash(frozenset(inst.items())))
 
-
+"""
 
 def sigmaT(inst):
     """
@@ -163,7 +164,7 @@ def photoz_selection(z, zmin, zmax, dNdz_func, sigma_z0):
     return dNdz * pz, n_tot
 
 
-def calculate_block_noise_im(ells, zmin, zmax):
+def calculate_block_noise_im(expt, ells, zmin, zmax):
     """
     Noise expressions for a 21cm IM experiment, using expressions from 
     Alonso et al. 
@@ -178,43 +179,42 @@ def calculate_block_noise_im(ells, zmin, zmax):
     _ell, _lam = np.meshgrid(ells, lam)
     
     # Use approximate interferometer noise expression, from Eq. 8 of Alonso.
-    if inst['type'] == 'interferometer':
+    if expt['type'] == 'interferometer':
         # Angular scaling
-        f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / inst['d_max'])**2. \
+        f_ell = np.exp(_ell*(_ell+1.) * (1.22 * _lam / expt['d_max'])**2. \
               / (8.*np.log(2.)))
 
         # Construct noise covariance
-        N_ij = f_ell * sigmaT(inst)**2. / dnu[:,None]
+        N_ij = f_ell * sigmaT(expt)**2. / dnu[:,None]
         # FIXME: Is this definitely channel bandwidth, rather than total bandwidth?
 
         # Apply large-scale cut
-        N_ij[np.where(_ell*_lam/(2.*np.pi) <= inst['d_min'])] = INF_NOISE
+        N_ij[np.where(_ell*_lam/(2.*np.pi) <= expt['d_min'])] = INF_NOISE
 
-    elif inst['type'] == 'dish':
+    elif expt['type'] == 'dish':
         # Single-dish experiment noise expression
         # (Ndish already included in sigma_T expression)
-        fwhm = 1.22 * _lam / inst['D']
+        fwhm = 1.22 * _lam / expt['D']
         B_l = np.exp(-_ell*(_ell+1) * fwhm**2. / (16.*np.log(2.)))
-        N_ij = sigmaT(inst)**2. / dnu[:,None] / B_l**2.
+        N_ij = sigmaT(expt)**2. / dnu[:,None] / B_l**2.
         
     else:
         raise NotImplementedError("Unrecognised instrument type '%s'." 
-                                  % inst['type'])
+                                  % expt['type'])
     
     # Transpose to get correct shape
     N_ij = N_ij.T
     
     # Apply kmax cutoff
-    lmax = lmax_for_redshift(cosmo, zmax, kmax0=KMAX0)
+    lmax = lmax_for_redshift(expt['cosmo'], zmax, kmax0=expt['kmax0'])
     for i in range(N_ij.shape[1]):
         #print "im zmax = %3.2f, lmax = %d" % (zmax[i], lmax[i])
         idx = np.where(ells > lmax[i])
         N_ij[idx,i] = INF_NOISE
-    
-    return 
+    return N_ij
 
 
-def calculate_block_noise_lsst(ells, zmin, zmax, nz_lsst):
+def calculate_block_noise_lsst(expt, ells, zmin, zmax, nz_lsst):
     """
     Shot noise in each redshift bin, taken by integrating dN/dz over the 
     selection function for the bin.
@@ -225,7 +225,7 @@ def calculate_block_noise_lsst(ells, zmin, zmax, nz_lsst):
         N_ij[:,i] = np.ones(ells.size) / nz
     
     # Apply kmax cutoff
-    lmax = lmax_for_redshift(cosmo, zmax, kmax0=KMAX0)
+    lmax = lmax_for_redshift(expt['cosmo'], zmax, kmax0=expt['kmax0'])
     for i in range(N_ij.shape[1]):
         #print "pz zmax = %3.2f, lmax = %d" % (zmax[i], lmax[i])
         idx = np.where(ells > lmax[i])
@@ -234,7 +234,7 @@ def calculate_block_noise_lsst(ells, zmin, zmax, nz_lsst):
     return N_ij
     
 
-def selection_lsst(zmin, zmax, sigma_z0, bias_factor=1.):
+def selection_lsst(cosmo, zmin, zmax, sigma_z0, bias_factor=1.):
     """
     Calculate tomographic redshift bin selection function and bias for LSST.
     """
@@ -255,7 +255,7 @@ def selection_lsst(zmin, zmax, sigma_z0, bias_factor=1.):
     return n_lsst, ntot
 
 
-def selection_im(zmin, zmax, debug=False, bias_factor=1.):
+def selection_im(cosmo, zmin, zmax, debug=False, bias_factor=1.):
     """
     Calculate tomographic redshift bin selection function and bias for an 
     IM experiment. Each factor of this tracer will have units of mK.
@@ -280,7 +280,7 @@ def selection_im(zmin, zmax, debug=False, bias_factor=1.):
         return n_im
 
 
-def calculate_block_fg(ells, zc):
+def calculate_block_fg(cosmo, ells, zc):
     """
     Calculate a correlated foreground block, using the model from Eq. 10 of 
     Alonso et al. (arXiv:1704.01941).
@@ -309,7 +309,7 @@ def calculate_block_fg(ells, zc):
     return A_fg * Fij
     
 
-def calculate_block_gen(ells, tracer1, tracer2):
+def calculate_block_gen(cosmo, ells, tracer1, tracer2):
     """
     Calculate a general (i.e. dense) block of cross-correlations.
     """
@@ -331,7 +331,7 @@ def calculate_block_gen(ells, tracer1, tracer2):
     return Cij_all
 
 
-def calculate_block_diag(ells, tracer1, tracer2=None):
+def calculate_block_diag(cosmo, ells, tracer1, tracer2=None):
     """
     Calculate an assumed-diagonal block of auto-correlations.
     """
@@ -383,7 +383,7 @@ def hasharg(args):
     return  "_" + str(abs(hash(st)))
 
 
-def cache_save(blkname, blk, args=None):
+def cache_save(blkname, prefix, blk, args=None):
     """
     Save a block to a cache file.
     """
@@ -391,7 +391,7 @@ def cache_save(blkname, blk, args=None):
         np.save("%s_%s" % (prefix, blkname + hasharg(args)), blk)
 
 
-def cache_load(blkname, args=None, shape=None):
+def cache_load(blkname, prefix, args=None, shape=None):
     """
     Load a cached datafile.
     """
@@ -404,27 +404,26 @@ def cache_load(blkname, args=None, shape=None):
     
     # Try to load cached data
     fname="%s_%s.npy" % (prefix, blkname + hasharg(args))
-    status ("  Trying to load %s from cache." % fname)
+    status ("  Trying to load %s" % fname)
     try:
         res = np.load(fname)
         status("  Loaded from cache.")
         cache_hit = True
         
-        if shape is not None:
         # Sanity check on shape of cached data
+        if shape is not None:
             assert res.shape[0] == shape[0]
             assert res.shape[1] == shape[1]
             if len(res.shape) > 2: assert res.shape[2] == shape[2]
         cache_valid = True
     except:
-        #raise
         status("  Failed to load from cache.")
         pass
     
     return res, cache_hit, cache_valid
 
 
-def cache(blkname, func, args, disabled=False):
+def cache(blkname, prefix, func, args, disabled=False):
     """
     Simple caching of computed blocks.
     """
@@ -435,7 +434,7 @@ def cache(blkname, func, args, disabled=False):
     # Check if cache exists and load from it if so (only root does I/O)
     # (can be disabled if requested)
     if myid == 0 and not disabled:
-        res, cache_hit, cache_valid = cache_load(blkname, args)
+        res, cache_hit, cache_valid = cache_load(blkname, prefix, args)
     
     # Inform all processes about cache status
     cache_hit = comm.bcast(cache_hit, root=0)
@@ -454,11 +453,11 @@ def cache(blkname, func, args, disabled=False):
             status("  Cache is from different setup. Overwriting.")
     res = func(*args)
     if not disabled:
-        cache_save(blkname, res, args)
+        cache_save(blkname, prefix, res, args)
     return res
 
 
-def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
+def deriv_photoz(expt, ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
     """
     Calculate derivative of covariance matrix w.r.t. photo-z parameters.
     """
@@ -468,19 +467,21 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
                          "or 'delta_z' (Delta z).")
     N1 = len(tracer1)
     N2 = len(tracer2)
+    cosmo = expt['cosmo']
+    sigma_z0 = expt['sigma_z0']
     
     # Build new set of tracers with modified photo-z properties
     tracer1_p = []; tracer1_m = []
     for i in range(zmin_lsst.size):
         if var == 'sigma':
-            tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+            tp, _ = selection_lsst(cosmo, zmin_lsst[i], zmax_lsst[i], 
                                    sigma_z0=sigma_z0+dp)
-            tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+            tm, _ = selection_lsst(cosmo, zmin_lsst[i], zmax_lsst[i], 
                                    sigma_z0=sigma_z0-dp)
         elif var == 'delta':
-            tp, _ = selection_lsst(zmin_lsst[i]+dp, zmax_lsst[i]+dp,
+            tp, _ = selection_lsst(cosmo, zmin_lsst[i]+dp, zmax_lsst[i]+dp,
                                    sigma_z0=sigma_z0)
-            tm, _ = selection_lsst(zmin_lsst[i]-dp, zmax_lsst[i]-dp, 
+            tm, _ = selection_lsst(cosmo, zmin_lsst[i]-dp, zmax_lsst[i]-dp, 
                                    sigma_z0=sigma_z0)
         else:
             raise NotImplemented
@@ -492,13 +493,14 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
     # Calculate +/- for each photoz bin; loop over tracers with +/- sigma_z0
     dCij_dvarz0 = []
     shape = (ells.size, N1+N2, N1+N2)
+    prefix = expt['prefix']
     for i in range(N1):
         
         # Check if this derivative exists in the cache
         cache_hit = False; cache_valid = False
         if myid == 0:
             blkname = "deriv_%sz0_%d" % (var, i)
-            res, cache_hit, cache_valid = cache_load(blkname, shape=shape)
+            res, cache_hit, cache_valid = cache_load(blkname, prefix, shape=shape)
             
             # Append result to list if cache exists; otherwise, run through the 
             # whole calculation below
@@ -521,12 +523,12 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
         comm.barrier()
         
         # Check if correlations should be ignored between photo-z bins
-        if IGNORE_PHOTOZ_CORR:
+        if expt['ignore_photoz_corr']:
             # Calculate the derivative only along the diagonal
             dC_p[:,:N1,:N1] = expand_diagonal( 
-                                    calculate_block_diag(ells, tracer1_p) )
+                                  calculate_block_diag(cosmo, ells, tracer1_p) )
             dC_m[:,:N1,:N1] = expand_diagonal( 
-                                    calculate_block_diag(ells, tracer1_m) )
+                                  calculate_block_diag(cosmo, ells, tracer1_m) )
         else:
             # Calculate the full dense photoz-photoz matrix derivative
             for j in range(N1):
@@ -572,15 +574,17 @@ def deriv_photoz(ells, tracer1, tracer2, zmin_lsst, zmax_lsst, var, dp=1e-3):
         if myid == 0:
             res = (dC_p_all - dC_m_all) / (2.*dp)
             dCij_dvarz0.append(res)
-            cache_save(blkname, res)
+            cache_save(blkname, prefix, res)
         
     return dCij_dvarz0
 
 
-def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
+def deriv_bias(expt, ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     """
     Calculate derivative of covariance matrix w.r.t. photo-z parameters.
     """
+    c = expt['cosmo']
+    
     N1 = len(tracer1)
     N2 = len(tracer2)
     zmin_lsst, zmax_lsst = z_lsst
@@ -589,16 +593,16 @@ def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     # Build new set of tracers with modified bias properties
     tracer1_p = []; tracer1_m = []
     for i in range(zmin_lsst.size):
-        tp, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+        tp, _ = selection_lsst(c, zmin_lsst[i], zmax_lsst[i], 
                                sigma_z0=sigma_z0, bias_factor=1.+dp)
-        tm, _ = selection_lsst(zmin_lsst[i], zmax_lsst[i], 
+        tm, _ = selection_lsst(c, zmin_lsst[i], zmax_lsst[i], 
                                sigma_z0=sigma_z0, bias_factor=1.-dp)
         tracer1_p.append(tp); tracer1_m.append(tm)
     
     tracer2_p = []; tracer2_m = []
     for i in range(zmin_im.size):
-        tp = selection_im(zmin_im[i], zmax_im[i], bias_factor=1.+dp)
-        tm = selection_im(zmin_im[i], zmax_im[i], bias_factor=1.-dp)
+        tp = selection_im(c, zmin_im[i], zmax_im[i], bias_factor=1.+dp)
+        tm = selection_im(c, zmin_im[i], zmax_im[i], bias_factor=1.-dp)
         tracer2_p.append(tp); tracer2_m.append(tm)
     
     # Define dummy arguments for build_covmat() that have the correct length
@@ -608,13 +612,13 @@ def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     status("deriv bias1")
     Cij_bias1p = cache('deriv_bias1p', 
                        build_covmat, 
-                       (ells, tracer1_p, tracer2, 
+                       (expt, ells, tracer1_p, tracer2, 
                        (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     Cij_bias1m = cache('deriv_bias1m', 
                        build_covmat, 
-                       (ells, tracer1_m, tracer2, 
+                       (expt, ells, tracer1_m, tracer2, 
                        (dummy1, dummy1, dummy1), (dummy2, dummy3),  
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
@@ -624,13 +628,13 @@ def deriv_bias(ells, tracer1, tracer2, z_lsst, z_im, dp=0.02):
     # nz_lsst, zmin_im, zmax_im
     Cij_bias2p = cache('deriv_bias2p', 
                        build_covmat, 
-                       (ells, tracer1, tracer2_p, 
+                       (expt, ells, tracer1, tracer2_p, 
                        (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_im_im', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
     Cij_bias2m = cache('deriv_bias2m', 
                        build_covmat, 
-                       (ells, tracer1, tracer2_m, 
+                       (expt, ells, tracer1, tracer2_m, 
                        (dummy1, dummy1, dummy1), (dummy2, dummy3), 
                        ['Sij_pz_pz', 'Nij_im_im', 'Nij_pz_pz', 'Fij_im_im'],
                        True))
@@ -654,12 +658,15 @@ def invert_covmat(cov):
     return icov
 
 
-def build_covmat(ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[], 
+def build_covmat(expt, ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[], 
                  nocache=False):
     """
     Build full covariance matrix from individual blocks.
     N.B. tracer2 should be the IM tracer!
     """
+    cosmo = expt['cosmo']
+    prefix = expt['prefix']
+    
     # Number of tracer redshift bins
     N1 = len(tracer1)
     N2 = len(tracer2)
@@ -681,44 +688,45 @@ def build_covmat(ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[],
     # Calculate IM auto block
     if 'Sij_im_im' not in exclude:
         status("signal im-im")
-        Sij_im_im = cache('Sij_im_im', 
+        Sij_im_im = cache('Sij_im_im', prefix,
                           calculate_block_diag, 
-                          (ells, tracer2), disabled=nocache)
+                          (cosmo, ells, tracer2), disabled=nocache)
 
     # Calculate LSST auto block
     if 'Sij_pz_pz' not in exclude:
         status("signal photoz-photoz")
-        if IGNORE_PHOTOZ_CORR: 
+        if expt['ignore_photoz_corr']: 
             calculate_block_photoz = calculate_block_diag
         else:
             calculate_block_photoz = calculate_block_gen
-        Sij_pz_pz = cache('Sij_pz_pz', 
+        Sij_pz_pz = cache('Sij_pz_pz', prefix,
                           calculate_block_photoz, 
-                          (ells, tracer1, tracer1), disabled=nocache)
+                          (cosmo, ells, tracer1, tracer1), disabled=nocache)
             
     
     # Calculate cross-tracer signal block
     if 'Sij_pz_im' not in exclude:
         status("signal photoz-im")
-        Sij_pz_im = cache('Sij_pz_im', 
+        Sij_pz_im = cache('Sij_pz_im', prefix,
                           calculate_block_gen, 
-                          (ells, tracer1, tracer2), disabled=nocache)
+                          (cosmo, ells, tracer1, tracer2), disabled=nocache)
     
     # Calculate IM noise auto block
     if 'Nij_im_im' not in exclude:
         status("noise im-im")
-        #Nij_im_im = cache('Nij_im_im', 
+        #Nij_im_im = cache('Nij_im_im', prefix,
         #                  calculate_block_noise_im, 
         #                  (ells, zmin_im, zmax_im), disabled=nocache)
-        Nij_im_im = calculate_block_noise_im(ells, zmin_im, zmax_im)
+        Nij_im_im = calculate_block_noise_im(expt, ells, zmin_im, zmax_im)
     
     # Calculate LSST noise auto block
     if 'Nij_pz_pz' not in exclude:
         status("noise photoz-photoz")
-        #Nij_pz_pz = cache('Nij_pz_pz', 
+        #Nij_pz_pz = cache('Nij_pz_pz', prefix,
         #                  calculate_block_noise_lsst, 
         #                  (ells, zmin_lsst, zmax_lsst, nz_lsst), disabled=nocache)
-        Nij_pz_pz = calculate_block_noise_lsst(ells, zmin_lsst, zmax_lsst, nz_lsst)
+        Nij_pz_pz = calculate_block_noise_lsst(expt, ells, zmin_lsst, 
+                                               zmax_lsst, nz_lsst)
     
     # Calculate IM foreground residual auto block
     #if 'Fij_im_im' not in exclude:
@@ -751,24 +759,26 @@ def corrmat(mat):
     return mat_corr
 
 
-def fisher(ells, z_lsst, z_im):
+def fisher(expt, ells, z_lsst, z_im):
     """
     Calculate Fisher matrix.
     """
+    c = expt['cosmo']
+    
     # Get redshift bin arrays
     zmin_lsst, zmax_lsst = z_lsst
     zmin_im, zmax_im = z_im
     
     # Initialise tracers
     status("Initialising tracers...")
-    lsst_sel = [ selection_lsst(zmin_lsst[i], zmax_lsst[i], sigma_z0=sigma_z0) 
+    lsst_sel = [ selection_lsst(c, zmin_lsst[i], zmax_lsst[i], expt['sigma_z0']) 
                  for i in range(zmin_lsst.size) ]
     tracer1, nz_lsst = zip(*lsst_sel)
-    tracer2 = [ selection_im(zmin_im[i], zmax_im[i]) 
+    tracer2 = [ selection_im(c, zmin_im[i], zmax_im[i]) 
                 for i in range(zmin_im.size) ]
     
     # Build covariance matrix and invert
-    cov = build_covmat(ells, tracer1, tracer2, 
+    cov = build_covmat(expt, ells, tracer1, tracer2, 
                        bins_lsst=(zmin_lsst, zmax_lsst, nz_lsst), 
                        bins_im=(zmin_im, zmax_im))
     if myid == 0:
@@ -778,14 +788,14 @@ def fisher(ells, z_lsst, z_im):
     
     # Get Fisher derivatives
     status("Calculating Fisher derivatives...")
-    derivs_pz_sigma = deriv_photoz(ells, tracer1, tracer2, 
+    derivs_pz_sigma = deriv_photoz(expt, ells, tracer1, tracer2, 
                                    zmin_lsst, zmax_lsst, 'sigma',
                                    dp=1e-3)
-    derivs_pz_delta = deriv_photoz(ells, tracer1, tracer2, 
+    derivs_pz_delta = deriv_photoz(expt, ells, tracer1, tracer2, 
                                    zmin_lsst, zmax_lsst, 'delta',
                                    dp=1e-3)
     """
-    derivs_bias = deriv_bias(ells, tracer1, tracer2, 
+    derivs_bias = deriv_bias(expt, ells, tracer1, tracer2, 
                              (zmin_lsst, zmax_lsst), 
                              (zmin_im, zmax_im), 
                              dp=0.02)
@@ -805,7 +815,7 @@ def fisher(ells, z_lsst, z_im):
             y_i = np.dot(Cinv[l], derivs_all[i][l])
             for j in range(Nparam):
               y_j = np.dot(Cinv[l], derivs_all[j][l])
-              Fij_ell[l,i,j] = inst['fsky_overlap'] * (ells[l] + 0.5) \
+              Fij_ell[l,i,j] = expt['fsky_overlap'] * (ells[l] + 0.5) \
                              * np.trace(np.dot(y_i, y_j))
     
     comm.barrier()
@@ -813,7 +823,7 @@ def fisher(ells, z_lsst, z_im):
     return None
 
 
-def zbins_lsst_alonso(nbins=15):
+def zbins_lsst_alonso(nbins=15, sigma_z0=0.03):
     """
     Get redshift bins edges as defined in Alonso et al.
     """
@@ -843,13 +853,32 @@ def zbins_im_growing(zmin, zmax, dz0=0.05):
     return zmin, zmax
 
 
+def setup_expt_info(cosmo, inst, kmax=0.2, sigma_z0=0.03, 
+                    ignore_photoz_corr=False):
+    """
+    Combine various instrumental/survey settings into a single settings 
+    dictionary.
+    """
+    inst['kmax0'] = kmax
+    inst['sigma_z0'] = sigma_z0
+    inst['ignore_photoz_corr'] = ignore_photoz_corr
+    
+    # Get hash of experimental parameters
+    inst['prefix'] = "cache/%s_%s" % ( inst['name'], 
+                                      str(hash(frozenset(inst.items()))) )
+    
+    # Add cosmology object, for convenience
+    inst['cosmo'] = cosmo
+    return inst
+    
+
 # Example run/plotting script
 if __name__ == '__main__':
     import pylab as P
     
     # Define angular scales and redshift bins
     ells = np.arange(5, 501)
-    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15)
+    zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=15, sigma_z0=sigma_z0)
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
     # Build Fisher matrix
