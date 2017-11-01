@@ -23,6 +23,7 @@ INF_NOISE = 1e50 #np.inf #1e100
 LMAX=2000
 perPZ=True
 NBINS=15
+doplot=False
 
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
@@ -30,32 +31,33 @@ cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
 
 inst = {
     # Interferometer parameters
-    'name': "hrx",
+    'name': "DOE2m",
     'type': "interferometer",
-    'd_min':    6., # m
-    'd_max':    32*6.*np.sqrt(2), # m
-    'Ndish':   32*32,
-    'fsky' : 0.4,
+    'd_min':    2., # m
+    'd_max':    16*2.*np.sqrt(2), # m
+    'Ndish':   16*16,
+    'fsky' : 0.15,
     'Tsys' : 50, # in K
     'intgtime' : 2.8e4,
-    'fsky_overlap': 0.4
-}
-
-inst = {
-    # Interferometer parameters
-    'name': "GBT",
-    'type': "dish",
-    'D':    100,
-    'Ndish': 7,
-    'fsky' : 0.15,
-    'Tsys' : 30, # in K
-    'intgtime' : 3.2e4,
     'fsky_overlap': 0.15
 }
 
+if True:
+    inst = {
+        # Interferometer parameters
+        'name': "GBT3B",
+        'type': "dish",
+        'D':    100,
+        'Ndish': 3,
+        'fsky' : 0.15,
+        'Tsys' : 30, # in K
+        'intgtime' : 3.2e4,
+        'fsky_overlap': 0.15
+    }
 
 
-prefix = inst['name']+str(hash(frozenset(inst.items())))
+
+prefix = 'cache/'+inst['name']+str(hash(frozenset(inst.items())))
 
 
 
@@ -871,19 +873,20 @@ if __name__ == '__main__':
     if myid == 0:
         # Sum over ell modes; save unsummed matrix to file
         Fij = np.sum(Fij_ell, axis=0)
-        np.save("%s_Fij" % prefix, Fij_ell)
+        np.save(inst['name']+"_Fij", Fij_ell)
+        
+        if doplot:
+            C=np.linalg.inv(Fij)
+            P.matshow(C)
+            P.colorbar()
+            P.show()
 
-        C=np.linalg.inv(Fij)
-        P.matshow(C)
-        P.colorbar()
-        P.show()
-
-        errs=np.sqrt(C.diagonal())
-        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:NBINS],label='sigmaz')
-        P.plot((zmin_lsst+zmax_lsst)/2.0,errs[NBINS:2*NBINS],label='deltaz')
-        P.legend()
-        P.semilogy()
-        P.show()
+            errs=np.sqrt(C.diagonal())
+            P.plot((zmin_lsst+zmax_lsst)/2.0,errs[:NBINS],label='sigmaz')
+            P.plot((zmin_lsst+zmax_lsst)/2.0,errs[NBINS:2*NBINS],label='deltaz')
+            P.legend()
+            P.semilogy()
+            P.show()
         
     comm.barrier()
     exit()
