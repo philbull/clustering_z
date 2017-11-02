@@ -10,7 +10,7 @@ from scipy.special import erf
 from scipy.interpolate import interp1d
 import matplotlib.ticker
 #from multiprocessing import Pool
-import time
+import time, sys
 from mpi4py import MPI
 
 # Set up MPI
@@ -28,21 +28,70 @@ doplot=False
 # Set up cosmology and LSST instrumental specs
 cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
 
-
-inst = {
-    # Interferometer parameters
-    'name': "DOE2m",
-    'type': "interferometer",
-    'd_min':    2., # m
-    'd_max':    16*2.*np.sqrt(2), # m
-    'Ndish':   16*16,
-    'fsky' : 0.15,
-    'Tsys' : 50, # in K
-    'intgtime' : 2.8e4,
-    'fsky_overlap': 0.15
-}
-
-if True:
+case=sys.argv[1]
+if case=="0":
+    inst = {
+        'name':     "hrx",
+        'type':     "interferometer",
+        'd_min':    6., # m
+        'd_max':    32.*6.*np.sqrt(2), # m
+        'Ndish':    32*32,
+        'fsky' :    0.4,
+        'Tsys' :    50., # in K
+        'intgtime':     2.8e4, # hrs
+        'fsky_overlap': 0.4
+        }
+elif case=="1":
+    inst = {
+        # Interferometer parameters
+        'name': "DOE2m",
+        'type': "interferometer",
+        'd_min':    2., # m
+        'd_max':    16*2.*np.sqrt(2), # m
+        'Ndish':   16*16,
+        'fsky' : 0.15,
+        'Tsys' : 50, # in K
+        'intgtime' : 2.8e4,
+        'fsky_overlap': 0.15
+    }
+elif case=="2":
+    inst = {
+        # Interferometer parameters
+        'name': "DOE6m",
+        'type': "interferometer",
+        'd_min':    6., # m
+        'd_max':    16*6.*np.sqrt(2), # m
+        'Ndish':   16*16,
+        'fsky' : 0.15,
+        'Tsys' : 50, # in K
+        'intgtime' : 2.8e4,
+        'fsky_overlap': 0.15
+        }
+elif case=="3":
+    inst = {
+        # Interferometer parameters
+        'name': "GBT",
+        'type': "dish",
+        'D':    100,
+        'Ndish': 7,
+        'fsky' : 0.15,
+        'Tsys' : 30, # in K
+        'intgtime' : 3.2e4,
+        'fsky_overlap': 0.15
+    }
+elif case=="4":
+    inst = {
+        # Interferometer parameters
+        'name': "GBT05",
+        'type': "dish",
+        'D':    100,
+        'Ndish': 3,
+        'fsky' : 0.05,
+        'Tsys' : 30, # in K
+        'intgtime' : 3.2e4,
+        'fsky_overlap': 0.05
+    }
+elif case=="5":
     inst = {
         # Interferometer parameters
         'name': "GBT3B",
@@ -54,7 +103,9 @@ if True:
         'intgtime' : 3.2e4,
         'fsky_overlap': 0.15
     }
-
+else:
+   print "SHIT"
+   stop
 
 
 prefix = 'cache/'+inst['name']+str(hash(frozenset(inst.items())))
@@ -158,12 +209,13 @@ def photoz_selection(z, zmin, zmax, dNdz_func, sigma_z0):
 
 def calculate_nonlinear_ell (zc):
     dist=ccl.comoving_angular_distance(cosmo, 1./(1+zc))
-    gf=ccl.growth_factor(cosmo,1/(1+zc))
-    targetSigma=1.0/gf #SigmaR returns sigma^2 at z=0, but we want it at z=zc
-    Rs=np.arange(1,20)
-    sigmas2=ccl.sigmaR(cosmo,Rs)
-    RNl=interp1d(sigmas2,Rs)(targetSigma)
-    kNl=2./RNl  # From RNl to kNl
+    #gf=ccl.growth_factor(cosmo,1/(1+zc))
+    #targetSigma=1.0/gf #SigmaR returns sigma^2 at z=0, but we want it at z=zc
+    #Rs=np.arange(1,20)
+    #sigmas2=ccl.sigmaR(cosmo,Rs)
+    #RNl=interp1d(sigmas2,Rs)(targetSigma)
+    #kNl=2./RNl  # From RNl to kNl
+    kNl=0.4*np.sqrt(1+zc)
     ellNl = dist*kNl
     ellNl[ellNl>2000]=2000
     status ("At z="+repr(zc)+" kNl="+repr(kNl)+ " ellNl="+repr(ellNl))
