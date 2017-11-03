@@ -759,7 +759,7 @@ def corrmat(mat):
     return mat_corr
 
 
-def fisher(expt, ells, z_lsst, z_im):
+def fisher(expt, ells, z_lsst, z_im, debug=False):
     """
     Calculate Fisher matrix.
     """
@@ -781,6 +781,8 @@ def fisher(expt, ells, z_lsst, z_im):
     cov = build_covmat(expt, ells, tracer1, tracer2, 
                        bins_lsst=(zmin_lsst, zmax_lsst, nz_lsst), 
                        bins_im=(zmin_im, zmax_im))
+    
+    status("Inverting covariance matrix...")
     if myid == 0:
         Cinv = invert_covmat(cov)
     comm.barrier()
@@ -804,23 +806,56 @@ def fisher(expt, ells, z_lsst, z_im):
     derivs_all = list(derivs_pz_sigma) \
                + list(derivs_pz_delta)
                #+ list(derivs_bias)
+    derivs_all = np.array(derivs_all)
     Nparam = len(derivs_all)
+    Nparam = comm.bcast(Nparam, root=0)
 
-    # Calculate Fisher matrix
+    # Combine derivatives and inverse covmat into Fisher matrix (MPI enabled)
+    # Broadcast data to all workers
+    status("Broadcasting data to all workers...")
+    Fij_ell_local = np.zeros((ells.size, Nparam, Nparam))
+    Nz = len(tracer1) + len(tracer2)
+    if myid != 0:
+        Cinv = np.zeros((ells.size, Nz, Nz))
+        derivs_all = np.zeros((Nparam, ells.size, Nz, Nz))
+    comm.Bcast(Cinv, root=0) # FIXME: Would be more efficient to scatter by ell
+    comm.Bcast(derivs_all, root=0)
+    
+    # Loop over data array to build Fisher matrix as a fn. of ell
     status("Combining blocks into Fisher matrix...")
-    if myid == 0:
-        Fij_ell = np.zeros((ells.size, Nparam, Nparam))
-        for l in range(len(ells)):
-          for i in range(Nparam):
+    for l in range(len(ells)):
+        if l % 50 == 0:
+            status("  Processing l = %4d / %4d" % (ells[l], np.max(ells)) )
+        if l % size != myid: continue
+        # Loop over Nparam x Nparam matrix
+        for i in range(Nparam):
             y_i = np.dot(Cinv[l], derivs_all[i][l])
             for j in range(Nparam):
-              y_j = np.dot(Cinv[l], derivs_all[j][l])
-              Fij_ell[l,i,j] = expt['fsky_overlap'] * (ells[l] + 0.5) \
-                             * np.trace(np.dot(y_i, y_j))
+                y_j = np.dot(Cinv[l], derivs_all[j][l])
+                Fij_ell_local[l,i,j] = expt['fsky_overlap'] * (ells[l] + 0.5) \
+                                     * np.trace(np.dot(y_i, y_j))
     
-    comm.barrier()
-    if myid == 0: return Fij_ell
-    return None
+    # Combine matrices for ell values calculated by each worker
+    status("Combining Fisher matrix on root worker...")
+    Fij_ell = None
+    if myid == 0: Fij_ell = np.zeros(Fij_ell_local.shape)
+    comm.Reduce(Fij_ell_local, Fij_ell, op=MPI.SUM)
+    status("  Done.")
+    if myid == 0:
+        print np.trace(Fij_ell)
+    
+    # Return ell-by-ell Fisher matrix (plus debug info if requested)
+    if debug is False:
+        return Fij_ell
+    else:
+        dbg = {}
+        if myid == 0:
+            dbg = {
+                'cov':             cov,
+                'derivs_pz_sigma': derivs_pz_sigma,
+                'derivs_pz_delta': derivs_pz_delta,
+            }
+        return Fij_ell, dbg
 
 
 def zbins_lsst_alonso(nbins=15, sigma_z0=0.03):
