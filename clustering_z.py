@@ -19,7 +19,7 @@ size = comm.Get_size()
 
 ## user serviceable part
 LMAX=1000
-perPZ=False  # if true, do Alonso style per PZ bin
+perPZ=True  # if true, do Alonso style per PZ bin
 NBINS=15
 doplot=False
 IGNORE_PHOTOZ_CORR = False # Ignore correlations between photo-z bins?
@@ -27,6 +27,8 @@ IGNORE_PHOTOZ_CORR = False # Ignore correlations between photo-z bins?
 sigma_z0 = 0.03
 KMAX0 = 0.2 # Mpc^-1
 lmax_method='phil'
+A_FG=1
+XI_FG=2
 
 ## constants
 C = 299792.458 # Speed of light, km/s
@@ -133,13 +135,16 @@ else:
    stop
 
 
-prefix = 'cache/'+inst['name']+str(hash(frozenset(inst.items())))
-
 inst['cosmo']=cosmo
 inst['sigma_z0']=sigma_z0
-inst['prefix']=prefix
 inst['kmax0']=KMAX0
+inst['A_fg']=A_FG
+inst['xi_fg']=XI_FG
 
+## do this last, after inst is set, so that we can e.g. cahnge A_FG
+## and get new cache name
+prefix = 'cache/'+inst['name']+str(hash(frozenset(inst.items())))
+inst['prefix']=prefix
 
 
 def sigmaT(inst):
@@ -259,7 +264,7 @@ def lmax_for_redshift(cosmo, z, kmax0=0.2):
     """
     r = ccl.comoving_radial_distance(cosmo, 1./(1.+z))
     D = ccl.growth_factor(cosmo, 1./(1.+z))
-    lmax = r * D * kmax0
+    lmax = r * kmax0 / D
     return lmax
 
 
@@ -333,7 +338,7 @@ def calculate_block_noise_lsst(expt, ells, zmin, zmax, nz_lsst):
     # Apply kmax cutoff
     # Apply kmax cutoff
     if lmax_method=='anze':
-        lmax = calculate_nonlinear_ell (expt['cosmo'],zc)
+        lmax = calculate_nonlinear_ell (expt['cosmo'],0.5*(zmin+zmax))
     elif lmax_method=='phil':
         lmax = lmax_for_redshift(expt['cosmo'], zmax, kmax0=expt['kmax0'])
     for i in range(N_ij.shape[1]):
@@ -390,34 +395,58 @@ def selection_im(cosmo, zmin, zmax, debug=False, bias_factor=1.):
         return n_im
 
 
-def calculate_block_fg(cosmo, ells, zc):
+# def calculate_block_fg(expt, ells, zc):
+#     """
+#     Calculate a correlated foreground block, using the model from Eq. 10 of 
+#     Alonso et al. (arXiv:1704.01941).
+#     """
+#     # Foreground residual parameters
+#     A_fg = expt['A_fg']
+#     alpha = -2.7
+#     beta = -2.4
+#     xi = expt['xi_fg'] # Frequency correlation scale
+    
+#     # Pivot scales and frequency scaling
+#     l_star = 1000.
+#     nu_star = 130. # MHz
+#     nu = 1420. / (1. + zc)
+    
+#     # Calculate angle-dep. factor
+#     f_ell = (ells / l_star)**beta
+    
+#     # Frequency-dependent covariance factor
+#     _nu, _nuprime = np.meshgrid(nu, nu)
+#     f_nu = (_nu*_nuprime/nu_star**2.)**beta \
+#          * np.exp(-0.5 * np.log(_nu/_nuprime)**2. / xi**2.)
+    
+#     # Take product and return
+#     Fij = f_ell[:,None,None] * f_nu
+#     return A_fg * Fij
+
+def calculate_block_fg(expt, ells, zc):
     """
     Calculate a correlated foreground block, using the model from Eq. 10 of 
     Alonso et al. (arXiv:1704.01941).
     """
     # Foreground residual parameters
-    A_fg = 1. # mK^2
-    alpha = -2.7
-    beta = -2.4
-    xi = 100. # Frequency correlation scale
+    A_fg = expt['A_fg']
+    xi = expt['xi_fg'] # Frequency correlation scale
     
-    # Pivot scales and frequency scaling
-    l_star = 1000.
-    nu_star = 130. # MHz
     nu = 1420. / (1. + zc)
-    
-    # Calculate angle-dep. factor
-    f_ell = (ells / l_star)**beta
-    
     # Frequency-dependent covariance factor
     _nu, _nuprime = np.meshgrid(nu, nu)
-    f_nu = (_nu*_nuprime/nu_star**2.)**beta \
-         * np.exp(-0.5 * np.log(_nu/_nuprime)**2. / xi**2.)
-    
+
     # Take product and return
-    Fij = f_ell[:,None,None] * f_nu
-    return A_fg * Fij
-    
+    Fij = A_fg*np.exp (-(_nu-_nuprime)**2/(2*((_nu*_nuprime)/xi**2)))
+    #import matplotlib.pyplot as plt
+    #plt.imshow(Fij, interpolation='nearest')
+    #plt.colorbar()
+    #plt.show()
+    Fij = np.array([Fij]*len(ells))
+
+    return Fij
+
+
 
 def calculate_block_gen(cosmo, ells, tracer1, tracer2):
     """
@@ -843,12 +872,33 @@ def build_covmat(expt, ells, tracer1, tracer2, bins_lsst, bins_im, exclude=[],
                                                zmax_lsst, nz_lsst)
     
     # Calculate IM foreground residual auto block
-    #if 'Fij_im_im' not in exclude:
-        #status("foreground im-im")
-        #Fij_im_im = calculate_block_fg(ells, zc) # FIXME
+    if 'Fij_im_im' not in exclude:
+        status("foreground im-im")
+        Fij_im_im = calculate_block_fg(expt,ells, zc) 
     
     # Piece together blocks on root worker only
     if myid != 0: return None
+    
+    if False:
+        import matplotlib.pyplot as plt
+        plt.figure()
+        plt.subplot(2,2,1)
+        print Sij_im_im.shape
+        print Nij_im_im.shape
+        print Fij_im_im.shape
+        plt.imshow(Sij_im_im, aspect='auto')
+        plt.colorbar()
+        plt.subplot(2,2,2)
+        plt.colorbar()
+        plt.imshow(Nij_im_im,aspect='auto')
+        plt.subplot(2,2,3)
+        plt.imshow(Fij_im_im[30])
+        plt.colorbar()
+        plt.subplot(2,2,4)
+        plt.imshow(Fij_im_im[300])
+        plt.colorbar()
+        plt.show()
+
     
     # Construct total covariance matrix
     status("Combining covariance blocks...")
@@ -1084,6 +1134,9 @@ if __name__ == '__main__':
     zmin_lsst, zmax_lsst = zbins_lsst_alonso(nbins=NBINS, sigma_z0=sigma_z0)
     zmin_im, zmax_im = zbins_im_growing(0.2, 2.5, dz0=0.04)
 
+    #calculate_block_fg(inst, ells, 0.5*(zmin_im+zmax_im))
+    #stop()
+        
     # Build Fisher matrix
     status("Calculating Fisher matrix...")
     t0 = time.time()
