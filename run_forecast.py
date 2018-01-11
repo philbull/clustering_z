@@ -51,8 +51,20 @@ zmin_im, zmax_im = clz.zbins_im_growing(0.2, 2.5, dz0=0.04)
 # Build Fisher matrix
 clz.status("Calculating Fisher matrix...")
 t0 = time.time()
-Fij_ell = clz.fisher(expt, ells, (zmin_lsst, zmax_lsst), (zmin_im, zmax_im))
+Fij_ell, dbg = clz.fisher(expt, ells, (zmin_lsst, zmax_lsst), (zmin_im, zmax_im), debug=True)
 clz.status("Run finished in %1.1f min." % ((time.time() - t0)/60.))
+
+if clz.myid == 0:
+    # Get debug info
+    cov = dbg['cov']
+    derivs_pz_sigma = dbg['derivs_pz_sigma']
+    derivs_pz_delta = dbg['derivs_pz_delta']
+
+    print cov.shape
+
+
+clz.comm.barrier()
+exit()
 
 if clz.myid == 0:
     # Sum over ell modes; save unsummed matrix to file
