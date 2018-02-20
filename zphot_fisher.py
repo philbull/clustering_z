@@ -17,20 +17,17 @@ import time
 
 np.random.seed(10)
 
-class SpectroZ:
+class SpectroZ(object):
     """
     A class to define some variables defining the spectroscopic sample.
     """
-    def __init__(self, selection_fn=None):
-        self.zlo   = 0.8			# Model range after CHIME.
-        self.zhi   = 2.5			# Model range after CHIME.
-        self.ngals = 100000			# Total number of galaxies.
-        
-        # FIXME
-        #self.ngals *= 10
+    def __init__(self, selection_fn=None, zlo=0.8, zhi=2.5, ngals=1e5, dz=0.1):
+        self.zlo   = zlo			# Model range after CHIME.
+        self.zhi   = zhi			# Model range after CHIME.
+        self.ngals = int(ngals)  	# Total number of galaxies.
         
         # True z bin edges which define our N_i.
-        self.edges = np.arange(self.zlo, self.zhi+0.01, 0.1)
+        self.edges = np.arange(self.zlo, self.zhi+0.1*dz, dz)
         
         self.z_cdf = None
         if selection_fn is not None:
@@ -71,7 +68,7 @@ class SpectroZ:
         return(zs)
 
 
-class PhotoZ:
+class PhotoZ(object):
     """
     A class to define P(zphoto|zspectro).
     Currently modeled as two Gaussians (core and tail) and a relative amplitude.
@@ -155,7 +152,7 @@ def make_cov(S, priors, pzbin, Nmc=1000):
     
     # Perform Nmc Monte Carlo runs
     for i in range(Nmc):
-        if i % 50 == 0: print("  %d / %d" % (i, Nmc))
+        if i % 500 == 0: print("  %d / %d" % (i, Nmc))
         
         # Draw hyperparameters from hyperpriors
         ptail = np.random.uniform(low=priors['ptail_min'], 
@@ -180,22 +177,37 @@ def make_cov(S, priors, pzbin, Nmc=1000):
     avg = np.mean(Ns,axis=0)
     cov = np.cov(Ns,rowvar=False)
     
-    # FIXME
-    #np.save("pz_pdf", pz_pdf)
+    pct = np.arange(101)
+    pcts = [np.percentile(Ns, _p, axis=0) for _p in pct]
     
-    return( (avg, cov) )
+    return( (avg, cov, np.array(pcts)) )
     #
+
+def selection_uniform(z):
+    """
+    Uniform spectroscopic selection function.
+    """
+    return 0.*z + 1.
 
 
 if __name__ == "__main__":
     t0 = time.time()
     
-    S = SpectroZ(selection_fn=dNdz_lsst)
+    # Set up MPI
+    from mpi4py import MPI
+    comm = MPI.COMM_WORLD
+    myid = comm.Get_rank()
+    size = comm.Get_size()
+    
+    #S = SpectroZ(selection_fn=dNdz_lsst)
+    S = SpectroZ(selection_fn=selection_uniform, zlo=0., zhi=3., 
+                 ngals=1e5, dz=0.01)
     
     zmin, zmax = zbins_lsst_alonso(nbins=15, sigma_z0=0.03)
-    for i in [7,]: #range(zmin.size):
+    for i in [10,]: #range(zmin.size):
+        if i % size != myid: continue
         
-        print("Bin %d (%2.2f -- %2.2f)" % (i, zmin[i], zmax[i]))
+        print("Bin %d (%2.2f -- %2.2f) [worker %d]" % (i, zmin[i], zmax[i], myid))
         zc = 0.5 * (zmin[i] + zmax[i])
         
         # Define redshift bin parameters
@@ -216,11 +228,13 @@ if __name__ == "__main__":
         }
         
         # Estimate covariance by Monte Carlo
-        avg, cov = make_cov(S, priors, pzbin)
+        avg, cov, pcts = make_cov(S, priors, pzbin, Nmc=10000)
         
         # Store results
-        np.save("zlsst_zphot_avg_%d" % i, avg)
-        np.save("zlsst_zphot_cov_%d" % i, cov)
+        np.save("output/zlsst_zphot_dz001_avg_%d" % i, avg)
+        np.save("output/zlsst_zphot_dz001_cov_%d" % i, cov)
+        np.save("output/zlsst_zphot_dz001_pcts_%d" % i, pcts)
         
-    print("Finished in %d sec." % (time.time() - t0))
-    #
+    print("Worker %d finished in %d sec." % (myid, time.time() - t0))
+    comm.barrier()
+    

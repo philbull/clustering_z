@@ -9,11 +9,6 @@ from scipy.special import erf
 import time
 from mpi4py import MPI
 
-# Set up MPI
-comm = MPI.COMM_WORLD
-myid = comm.Get_rank()
-size = comm.Get_size()
-
 C = 299792.458 # Speed of light, km/s
 INF_NOISE = 1e50 #np.inf #1e100
 
@@ -81,6 +76,7 @@ def kperp_fg(z, xi):
     """
     Hz = 100.*cosmo['h'] * ccl.h_over_h0(cosmo, 1./(1.+z)) # km/s/Mpc
     k_FG = np.pi * Hz / ((1. + z) * C * xi)
+    return k_FG
 
 
 def Tb(z):
@@ -109,6 +105,17 @@ def lmax_for_redshift(cosmo, z, kmax0=0.2):
     D = ccl.growth_factor(cosmo, 1./(1.+z))
     lmax = r * D * kmax0
     return lmax
+
+
+def lmin_for_redshift(cosmo, z, dmin):
+    """
+    Calculates lmin for an interferometer with a given minimum baseline length 
+    (dmin, in m).
+    """
+    nu = 1420. / (1. + z)
+    lam = (C * 1e3) / (nu * 1e6) # wavelength in m
+    lmin = 2.*np.pi * dmin / lam
+    return lmin
 
 
 def dNdz_lsst(z):
@@ -208,7 +215,6 @@ def calculate_block_noise_im(expt, ells, zmin, zmax):
     # Apply kmax cutoff
     lmax = lmax_for_redshift(expt['cosmo'], zmax, kmax0=expt['kmax0'])
     for i in range(N_ij.shape[1]):
-        #print "im zmax = %3.2f, lmax = %d" % (zmax[i], lmax[i])
         idx = np.where(ells > lmax[i])
         N_ij[idx,i] = INF_NOISE
     return N_ij
@@ -280,7 +286,7 @@ def selection_im(cosmo, zmin, zmax, debug=False, bias_factor=1.):
         return n_im
 
 
-def calculate_block_fg(cosmo, ells, zc):
+def calculate_block_fg(cosmo, ells, zc, xi=1.):
     """
     Calculate a correlated foreground block, using the model from Eq. 10 of 
     Alonso et al. (arXiv:1704.01941).
@@ -289,7 +295,7 @@ def calculate_block_fg(cosmo, ells, zc):
     A_fg = 1. # mK^2
     alpha = -2.7
     beta = -2.4
-    xi = 100. # Frequency correlation scale
+    xi = xi # Frequency correlation scale
     
     # Pivot scales and frequency scaling
     l_star = 1000.
@@ -910,6 +916,11 @@ def setup_expt_info(cosmo, inst, kmax=0.2, sigma_z0=0.03,
 # Example run/plotting script
 if __name__ == '__main__':
     import pylab as P
+    
+    # Set up MPI
+    comm = MPI.COMM_WORLD
+    myid = comm.Get_rank()
+    size = comm.Get_size()
     
     # Define angular scales and redshift bins
     ells = np.arange(5, 501)
