@@ -9,7 +9,7 @@ from scipy.integrate import simps
 import copy, time
 import photoz_selection_fns as selfns
 from clustering_z import zbins_lsst_alonso
-from fisher_limber import bias_lsst, corr
+from fisher_pzx21cm import bias_lsst, corr
 
 
 def trim_zeros(z, fz, thres=1e-40):
