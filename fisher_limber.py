@@ -315,25 +315,24 @@ if __name__ == '__main__':
     size = comm.Get_size()
 
     # Set up cosmology and LSST instrumental specs
-    cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, A_s=2.1e-9, n_s=0.96)
+    cosmo = ccl.Cosmology(Omega_c=0.27, Omega_b=0.045, h=0.67, 
+                          A_s=2.1e-9, n_s=0.96)
     chi = ccl.comoving_radial_distance(cosmo, a=1.) # Precomputes interpolation fn.
-
 
     # Start timing
     t0 = time.time()
 
     # Define spectroscopic redshift bins
-    ells = np.arange(53, 435, 50)
-    #ells = np.array([300.,])
+    ells = np.arange(2, 600, 1)
+    
+    i = 10 # FIXME
+    #zp = np.array([1.2, 1.3])
+    zpmin, zpmax = clz.zbins_lsst_alonso(nbins=15, sigma_z0=0.03)
+    zp = np.array([zpmin[i], zpmax[i]])
 
-    ##zp = np.array([1.0, 1.1, 1.2, 1.3, 1.4, 1.5]) # Photo-z bin edges
-    zp = np.array([1.2, 1.3])
-    #zp, _ = clz.zbins_lsst_alonso(nbins=15, sigma_z0=0.03)
-
-    #zs = np.arange(0.8, 2.4, 0.01) # Spectro-z bin edges
-    zs = np.arange(0.8, 2.4, 0.02) # Spectro-z bin edges
-    #zn = np.arange(zs.min(), zs.max()+0.005, (zs[1]-zs[0])*1.) # Photo-z sub-bins
-    zn = zs # FIXME: Just use the spectro-z bins as the photo-z sub-binning for now
+    #zs = np.arange(0., 3.01, 0.01) # Spectro-z bin edges
+    zs = np.arange(0.8, 2.41, 0.01) # FIXME
+    zn = zs
 
     if myid == 0:
         print "ell range (z=%2.2f) = %1.1f, %1.1f" \
@@ -363,6 +362,7 @@ if __name__ == '__main__':
     }
 
     F = fisher_cn(inst_hirax, cosmo, ells, zp, zs, zn, kmax0=0.2, xi=1000.)
+    np.save("Fisher_LSSTxHIRAX_selfn", F)
     Ftot = np.sum(F, axis=0)
 
     # FIXME

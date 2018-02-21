@@ -217,6 +217,10 @@ def calculate_block_noise_im(expt, ells, zmin, zmax):
     for i in range(N_ij.shape[1]):
         idx = np.where(ells > lmax[i])
         N_ij[idx,i] = INF_NOISE
+    
+    # Add infinite noise outside experiment bandwidth
+    # FIXME
+    
     return N_ij
 
 

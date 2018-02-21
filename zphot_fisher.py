@@ -1,17 +1,15 @@
 #!/usr/bin/env python
-#
-#
-# Python code to compute the "prior" covariance matrix of
-# binned number counts for objects selected within a photo-z
-# bin.  The photo-z nuisance parameters are marginalized over.
-#
-# This code is quite slow, but hopefully the brute-force approach
-# makes the logic easy to follow.
-#
-#
+"""
+Python code to compute the "prior" covariance matrix of
+binned number counts for objects selected within a photo-z
+bin.  The photo-z nuisance parameters are marginalized over.
+
+This code is quite slow, but hopefully the brute-force approach
+makes the logic easy to follow.
+"""
 from __future__ import print_function, division
 import numpy as np
-from clustering_z import dNdz_lsst, zbins_lsst_alonso #(nbins=15, sigma_z0=0.03)
+from clustering_z import dNdz_lsst, zbins_lsst_alonso
 from scipy.interpolate import interp1d
 import time
 
@@ -32,6 +30,7 @@ class SpectroZ(object):
         self.z_cdf = None
         if selection_fn is not None:
             self.z_cdf = self.selection_cdf(selection_fn)
+    
     
     def selection_cdf(self, selection_fn, zlow=0., zhigh=4.):
         """
@@ -59,7 +58,7 @@ class SpectroZ(object):
             raise ValueError("No selection function was provided for SpectroZ")
         
         zs = np.random.uniform(low=self.zlo, high=self.zhi, size=self.ngals)
-        return zs # FIXME
+        return zs
         
         # Sample spectroscopic redshifts using the inverted cdf of the 
         # selection function
@@ -90,13 +89,15 @@ class PhotoZ(object):
         Returns photometric redshifts, given z_spectro.
         """
         # We model the core as a Gaussian, offset by dzc and of width sigc.
-        zcore= self.dzc+self.sigc*np.random.normal(loc=0, scale=1, size=zs.size)
+        zcore = self.dzc \
+              + self.sigc * np.random.normal(loc=0, scale=1, size=zs.size)
         
         # The tail, or catastrophic failures, are currently modeled by a
         # Gaussian but better choices would be something offset, or
         # asymmetrical, something with tails (e.g. Lorentzian) or even a
         # uniform distribution.
-        ztail= self.dzt+self.sigt*np.random.normal(loc=0, scale=1, size=zs.size)
+        ztail = self.dzt \
+              + self.sigt * np.random.normal(loc=0, scale=1, size=zs.size)
         
         # Now just produce a mixture of core and tail shifts.  We can also
         # make ptail depend on zs (as a proxy for luminosity for example).
@@ -141,14 +142,15 @@ def make_cov(S, priors, pzbin, Nmc=1000):
     photo-z parameters, and determine the covariance by Monte-Carlo.
     """
     P = PhotoZ(0.0)
-    y = make_one(S,P)
-    Ns= np.empty( (Nmc, y.size) )
+    y = make_one(S, P)
+    Ns = np.empty( (Nmc, y.size) )
     
     # Get photo-z bin parameters
     zrange = pzbin['zrange']
     
-    zs = np.linspace(-1., 1., 200)
-    pz_pdf = np.zeros((zs.size, Nmc))
+    #zs = np.linspace(-1., 1., 200)
+    #zs = np.linspace(0., 1., 200)
+    #pz_pdf = np.zeros((zs.size, Nmc))
     
     # Perform Nmc Monte Carlo runs
     for i in range(Nmc):
@@ -168,20 +170,19 @@ def make_cov(S, priors, pzbin, Nmc=1000):
         # Create new PhotoZ object
         P = PhotoZ(dzc=dzc, dzt=dzt, sigc=sigc, sigt=sigt, ptail=ptail, 
                    zrange=zrange)
-        
-        pz_pdf[:,i] = P.pz(zs)
+        #pz_pdf[:,i] = P.pz(zs)
         
         # Draw a selection function given this set of PhotoZ parameters
         Ns[i,:] = make_one(S, P)
     
-    avg = np.mean(Ns,axis=0)
-    cov = np.cov(Ns,rowvar=False)
+    avg = np.mean(Ns, axis=0)
+    cov = np.cov(Ns, rowvar=False)
     
     pct = np.arange(101)
     pcts = [np.percentile(Ns, _p, axis=0) for _p in pct]
     
     return( (avg, cov, np.array(pcts)) )
-    #
+
 
 def selection_uniform(z):
     """
@@ -204,7 +205,7 @@ if __name__ == "__main__":
                  ngals=1e5, dz=0.01)
     
     zmin, zmax = zbins_lsst_alonso(nbins=15, sigma_z0=0.03)
-    for i in [10,]: #range(zmin.size):
+    for i in range(zmin.size):
         if i % size != myid: continue
         
         print("Bin %d (%2.2f -- %2.2f) [worker %d]" % (i, zmin[i], zmax[i], myid))
@@ -231,9 +232,12 @@ if __name__ == "__main__":
         avg, cov, pcts = make_cov(S, priors, pzbin, Nmc=10000)
         
         # Store results
-        np.save("output/zlsst_zphot_dz001_avg_%d" % i, avg)
-        np.save("output/zlsst_zphot_dz001_cov_%d" % i, cov)
-        np.save("output/zlsst_zphot_dz001_pcts_%d" % i, pcts)
+        np.save("output/Prior_LSST_selfn_avg_%2d" % i, avg)
+        np.save("output/Prior_LSST_selfn_cov_%2d" % i, cov)
+        np.save("output/Prior_LSST_selfn_pcts_%2d" % i, pcts)
+        #np.save("output/zlsst_zphot_dz001_avg_%d" % i, avg)
+        #np.save("output/zlsst_zphot_dz001_cov_%d" % i, cov)
+        #np.save("output/zlsst_zphot_dz001_pcts_%d" % i, pcts)
         
     print("Worker %d finished in %d sec." % (myid, time.time() - t0))
     comm.barrier()
