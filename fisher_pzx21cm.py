@@ -262,6 +262,7 @@ def fisher_cn(inst, cosmo, ells, zp, zs, zn, kmax0=0.14, xi=0.1):
     cinv = clz.invert_covmat(cov)
 
     # Calculate derivative of signal cov w.r.t. photo-z sub-bin params
+    print (Ns,) + cs.shape
     cs_deriv = np.zeros((Ns,) + cs.shape)
     for j in range(Ns):
         if j % 10 == 0: print("\t%d" % j)
@@ -323,9 +324,9 @@ if __name__ == '__main__':
     t0 = time.time()
 
     # Define spectroscopic redshift bins
-    ells = np.arange(2, 600, 1)
+    ells = np.arange(2, 601, 1)
     
-    i = 10 # FIXME
+    i = 8 # FIXME
     #zp = np.array([1.2, 1.3])
     zpmin, zpmax = clz.zbins_lsst_alonso(nbins=15, sigma_z0=0.03)
     zp = np.array([zpmin[i], zpmax[i]])
@@ -335,11 +336,11 @@ if __name__ == '__main__':
     zn = zs
 
     if myid == 0:
-        print "ell range (z=%2.2f) = %1.1f, %1.1f" \
+        print "\tell range (z=%2.2f) = %1.1f, %1.1f" \
             % ( zs[0], 
                 clz.lmin_for_redshift(cosmo, zs[0], dmin=6.), 
                 clz.lmax_for_redshift(cosmo, zs[0], kmax0=0.2) )
-        print "ell range (z=%2.2f) = %1.1f, %1.1f" \
+        print "\tell range (z=%2.2f) = %1.1f, %1.1f" \
             % ( zs[-1], 
                 clz.lmin_for_redshift(cosmo, zs[-1], dmin=6.), 
                 clz.lmax_for_redshift(cosmo, zs[-1], kmax0=0.2) )
@@ -361,7 +362,7 @@ if __name__ == '__main__':
         'fsky_overlap': 0.4,
     }
 
-    F = fisher_cn(inst_hirax, cosmo, ells, zp, zs, zn, kmax0=0.2, xi=1000.)
+    F = fisher_cn(inst_hirax, cosmo, ells, zp, zs, zn, kmax0=0.2, xi=10.)
     np.save("Fisher_LSSTxHIRAX_selfn", F)
     Ftot = np.sum(F, axis=0)
 
