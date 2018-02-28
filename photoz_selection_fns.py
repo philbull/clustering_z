@@ -8,11 +8,18 @@ from scipy.integrate import simps, quad, cumtrapz
 from scipy.interpolate import interp1d
 from clustering_z import zbins_lsst_alonso, dNdz_lsst
 
+pz_params_default = {
+    'dzc':      0., 
+    'dzt':      0.2, 
+    'sigma_t':  5.,  # will be multiplied by sigma_z0*(1+z)
+    'ptail':    0.05
+}
+
 # Photo-z pdf settings
-dzc = 0. #0.01
-dzt = 0.2
-sigt_fac = 1. #5.
-ptail = 0. #0.05
+#dzc = 0. #0.01
+#dzt = 0.2
+#sigt_fac = 1. #5.
+#ptail = 0. #0.05
 
 def pdf_2gaussian(zp, zs, dzc, dzt, sigma_c, sigma_t, ptail):
     """
@@ -49,7 +56,7 @@ def binned_selection_fn(zs, zbins, selfn):
 
 
 def calc_selection_fn(zs, zmin, zmax, pdf=pdf_2gaussian, sigma_z0=0.03, 
-                      normed=False):
+                      normed=False, pz_params=pz_params_default):
     """
     Calculate photo-z selection function by integrating photo-z pdf over z_phot.
     """
@@ -59,13 +66,8 @@ def calc_selection_fn(zs, zmin, zmax, pdf=pdf_2gaussian, sigma_z0=0.03,
     sigma_z = sigma_z0 * (1. + zc)
     
     # Set photo-z pdf function and parameters
-    pz_params = {
-        'dzc':      dzc, 
-        'dzt':      dzt, 
-        'sigma_c':  sigma_z, 
-        'sigma_t':  sigt_fac*sigma_z, 
-        'ptail':    ptail
-    }
+    pz_params['sigma_c'] = sigma_z
+    pz_params['sigma_t'] *= sigma_z
     
     # Perform integral over zp for each zs
     ZS, ZP = np.meshgrid(zs, zp)
