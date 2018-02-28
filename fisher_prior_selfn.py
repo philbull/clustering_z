@@ -232,9 +232,9 @@ if __name__ == "__main__":
         avg, cov, pcts = make_cov(S, priors, pzbin, Nmc=10000)
         
         # Store results
-        np.save("output/Prior_LSST_selfn_avg_%2d" % i, avg)
-        np.save("output/Prior_LSST_selfn_cov_%2d" % i, cov)
-        np.save("output/Prior_LSST_selfn_pcts_%2d" % i, pcts)
+        np.save("output/Prior_LSST_selfn_avg_%02d" % i, avg)
+        np.save("output/Prior_LSST_selfn_cov_%02d" % i, cov)
+        np.save("output/Prior_LSST_selfn_pcts_%02d" % i, pcts)
         #np.save("output/zlsst_zphot_dz001_avg_%d" % i, avg)
         #np.save("output/zlsst_zphot_dz001_cov_%d" % i, cov)
         #np.save("output/zlsst_zphot_dz001_pcts_%d" % i, pcts)
