@@ -260,9 +260,40 @@ def fisher_cn(inst, cosmo, ells, zp, zs, zn, kmax0=0.14, xi=0.1):
 
     # Invert total covariance matrix
     cinv = clz.invert_covmat(cov)
-
+    
+    # Build Fisher matrix
+    F = np.zeros((ells.size, Ns, Ns))
+    for l in range(ells.size):
+        if l % size != myid: continue
+        print("\tell = %d" % ells[l])
+        for i in range(Ns):
+            #if i % 50 == 0: print("\t    Bin i=%d" % i)
+            
+            # Build derivative matrix w.r.t. i
+            dCs_i = np.zeros(cs.shape)
+            dCs_i[:,:Np,Np+i] = cs[:,:Np,Np+i] / cn_fid[:,i] # dC/dc_n ~ C / c_n
+            dCs_i[:,Np+i,:Np] = dCs_i[:,:Np,Np+i]
+            deriv_i = np.dot(cinv[l], dCs_i[l]) # C^-1 dC/dc_n
+            
+            for j in range(i, Ns):
+                # Build derivative matrix w.r.t. j
+                dCs_j = np.zeros(cs.shape)
+                dCs_j[:,:Np,Np+j] = cs[:,:Np,Np+j] / cn_fid[:,j]
+                dCs_j[:,Np+j,:Np] = dCs_j[:,:Np,Np+j]
+                deriv_j = np.dot(cinv[l], dCs_j[l]) # C^-1 dC/dc_n
+                
+                # Construct Fisher matrix element
+                F[l,i,j] = np.trace( np.dot(deriv_i, deriv_j) )
+                F[l,j,i] = F[l,i,j]
+    
+    # Combine all calculated F_ell at the root process
+    F_all = np.zeros(F.shape)
+    comm.Reduce(F, F_all, op=MPI.SUM)
+    return F_all
+    
+    """
     # Calculate derivative of signal cov w.r.t. photo-z sub-bin params
-    print (Ns,) + cs.shape
+    # FIXME: This can use a huge amount of memory!
     cs_deriv = np.zeros((Ns,) + cs.shape)
     for j in range(Ns):
         if j % 10 == 0: print("\t%d" % j)
@@ -278,22 +309,12 @@ def fisher_cn(inst, cosmo, ells, zp, zs, zn, kmax0=0.14, xi=0.1):
         
     # Shape: (N_ell, Ns, Np+Ns, Np+Ns)
     cs_deriv = np.swapaxes(cs_deriv, 1, 0)
-
-    # Build Fisher matrix
-    F = np.zeros((ells.size, Ns, Ns))
-    for l in range(ells.size):
-        if l % size != myid: continue
-        print("\tell = %d" % ells[l])
-        for i in range(Ns):
-            if i % 10 == 0: print("\t    i=%d" % i)
-            for j in range(i, Ns):
-                F[l,i,j] = np.trace( np.dot(cs_deriv[l,i], cs_deriv[l,j]) )
-                F[l,j,i] = F[l,i,j]
     
     # Combine all calculated F_ell at the root process
     F_all = np.zeros(F.shape)
     comm.Reduce(F, F_all, op=MPI.SUM)
     return F_all
+    """
     
 
 def corr(c):
@@ -368,10 +389,10 @@ if __name__ == '__main__':
 
     # FIXME
     cov = np.linalg.pinv(Ftot[:50,:50])
-
-    #-------------------------------------------------------------------------------
+ #-------------------------------------------------------------------------------
     print("Run took %2.1f sec." % (time.time() - t0))
-
+    
+    """
     # Plot Fisher matrix
     if myid == 0:
         #P.matshow(np.log10(Ftot), cmap='Blues') #, vmin=-10., vmax=2.)
@@ -384,4 +405,4 @@ if __name__ == '__main__':
         #P.colorbar()
         #P.plot(np.diag(cov), 'r-', lw=1.8)
         P.show()
-
+    """
