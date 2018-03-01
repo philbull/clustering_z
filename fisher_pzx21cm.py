@@ -267,20 +267,20 @@ def fisher_cn(inst, cosmo, ells, zp, zs, zn, kmax0=0.14, xi=0.1):
         if l % size != myid: continue
         print("\tell = %d" % ells[l])
         for i in range(Ns):
-            #if i % 50 == 0: print("\t    Bin i=%d" % i)
+            if i % 10 == 0: print("\t    Bin i=%d" % i)
             
             # Build derivative matrix w.r.t. i
-            dCs_i = np.zeros(cs.shape)
-            dCs_i[:,:Np,Np+i] = cs[:,:Np,Np+i] / cn_fid[:,i] # dC/dc_n ~ C / c_n
-            dCs_i[:,Np+i,:Np] = dCs_i[:,:Np,Np+i]
-            deriv_i = np.dot(cinv[l], dCs_i[l]) # C^-1 dC/dc_n
+            dCs_i = np.zeros((cs.shape[1], cs.shape[2]))
+            dCs_i[:Np,Np+i] = cs[l,:Np,Np+i] / cn_fid[:,i] # dC/dc_n ~ C / c_n
+            dCs_i[Np+i,:Np] = dCs_i[:Np,Np+i]
+            deriv_i = np.dot(cinv[l], dCs_i) # C^-1 dC/dc_n
             
             for j in range(i, Ns):
                 # Build derivative matrix w.r.t. j
-                dCs_j = np.zeros(cs.shape)
-                dCs_j[:,:Np,Np+j] = cs[:,:Np,Np+j] / cn_fid[:,j]
-                dCs_j[:,Np+j,:Np] = dCs_j[:,:Np,Np+j]
-                deriv_j = np.dot(cinv[l], dCs_j[l]) # C^-1 dC/dc_n
+                dCs_j = np.zeros((cs.shape[1], cs.shape[2]))
+                dCs_j[:Np,Np+j] = cs[l,:Np,Np+j] / cn_fid[:,j]
+                dCs_j[Np+j,:Np] = dCs_j[:Np,Np+j]
+                deriv_j = np.dot(cinv[l], dCs_j) # C^-1 dC/dc_n
                 
                 # Construct Fisher matrix element
                 F[l,i,j] = np.trace( np.dot(deriv_i, deriv_j) )
